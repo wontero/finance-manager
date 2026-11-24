@@ -51,18 +51,24 @@ Ejecuta `npm run db:stop` para cerrar la sesión del servidor en primer plano de
 ## Compilar y ejecutar
 
 - `npm run dev` inicia Express y Vite. El endpoint de salud está en `http://localhost:3000/health` y la web se abre en `http://localhost:5173`. Puedes cambiar el puerto de Express con `PORT` en `.env`.
-- `npm run build` genera `dist/` en cada workspace. Ejecuta el servidor compilado con `node --env-file-if-exists=.env src/server/dist/index.js`.
+- `npm run build` genera `dist/` en cada workspace. Ejecuta `node app.js` para servir el build de la web, `/health` y `/mcp` desde el mismo proceso.
 
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
-- `npm run test:integration` requiere `npm run db:start`. Usa las credenciales de `DATABASE_URL` para probar el motor y los permisos de `finance_dev` en `finance_test`.
+- Ejecuta `npm run build` y `npm run db:start` antes de `npm run test:integration`. La suite prueba el arranque compilado, el estado de MariaDB y los permisos de `finance_dev` en `finance_test`. Al terminar, usa `npm run db:stop`.
+- `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
+
+## Despliegue
+
+La guía cubre la preparación de cPanel, el primer despliegue con Passenger, el rollback y la prueba del conector MCP en Claude web y móvil. [Guía de despliegue](docs/operacion/despliegue.md)
 
 ## Estructura del repositorio
 
 - `src/core/` contiene el código compartido.
 - `src/server/` contiene la app HTTP, su punto de entrada y los scripts de MariaDB local.
+- `src/deploy/` contiene el script de despliegue y sus pruebas en Bash.
 - `src/web/` contiene la aplicación React y la configuración de shadcn/ui.
 - `src/scripts/` contiene la comprobación de versión de Node para las pruebas.
 - `docs/` contiene la documentación del proyecto.
