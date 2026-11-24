@@ -1,0 +1,17 @@
+{
+  "name": "@finance-manager/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@finance-manager/core": "0.0.0",
+    "express": "^5.1.0",
+    "mariadb": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0"
+  }
+}

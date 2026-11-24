@@ -1,0 +1,39 @@
+{
+  "name": "finance-manager",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "workspaces": [
+    "src/core",
+    "src/server",
+    "src/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "node src/scripts/check-node.mjs && vitest run",
+    "test:integration": "node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --mode integration",
+    "lint": "eslint src vitest.config.ts eslint.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check src \"*.json\" \"*.mjs\" \"*.ts\" README.md docs/arquitectura/arquitectura.md",
+    "dev": "concurrently --kill-others --names server,web \"tsx watch --env-file-if-exists=.env src/server/index.ts\" \"npm run dev --workspace @finance-manager/web\"",
+    "db:start": "tsx --env-file=.env src/server/scripts/database.ts start",
+    "db:stop": "tsx --env-file=.env src/server/scripts/database.ts stop"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^22.0.0",
+    "@types/supertest": "^6.0.0",
+    "concurrently": "^9.2.0",
+    "eslint": "^10.0.0",
+    "jsdom": "^27.0.0",
+    "prettier": "^3.6.0",
+    "supertest": "^7.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "~4.0.18"
+  }
+}
