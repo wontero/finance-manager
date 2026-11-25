@@ -62,13 +62,14 @@ Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `
 - `npm run build` genera `dist/` en cada workspace. Ejecuta `node app.js` para servir el build de la web, `/health` y `/mcp` desde el mismo proceso.
 - `npm run migrate`, después de compilar, aplica migraciones sobre `MIGRATION_DATABASE_URL` y actualiza las vistas de `READONLY_DATABASE_NAME`. Con el `.env` de ejemplo apunta a `finance_dev` y `finance_dev_ro`.
 - `/mcp` exige un token de acceso OAuth con el ámbito `finance`. Configura `PUBLIC_URL` y `TOTP_ENCRYPTION_KEY`, aplica las migraciones y ejecuta `npm run auth:setup` en una terminal para crear el usuario con contraseña y TOTP. En desarrollo, puedes omitir `PUBLIC_URL` para usar `http://localhost` con `PORT`.
+- Desde Claude puedes registrar gastos, importar capturas en lotes reversibles y consultar saldos, movimientos o patrimonio. `consulta_sql` usa `READONLY_DATABASE_URL` con un usuario lector y las vistas de la base de solo lectura.
 - `npm run auth:tokens -- list` lista los identificadores de tokens activos. Usa `npm run auth:tokens -- revoke <id>` para revocar una familia o `npm run auth:tokens -- revoke-all` para desconectar todos los clientes.
 - `npm run auth:unlock` borra los intentos vigentes de inicio de sesión y conserva los tokens emitidos.
 
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
-- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso, los servicios contables, el flujo OAuth y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
+- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso, los servicios contables, el flujo OAuth, las herramientas MCP y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
 - `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
 
@@ -81,6 +82,7 @@ La guía cubre cPanel y Passenger, el rollback, el alta del usuario y la conexi�
 - `src/core/` contiene las validaciones y reglas contables puras, además del código compartido.
 - `src/server/` contiene la app HTTP, su punto de entrada y los scripts de MariaDB local.
 - `src/server/ledger/` contiene los servicios contables que escriben en MariaDB y registran la bitácora.
+- `src/server/mcp/` valida entradas y adapta los servicios contables a las herramientas en español.
 - `src/deploy/` contiene el script de despliegue y sus pruebas en Bash.
 - `src/web/` contiene la aplicación React y la configuración de shadcn/ui.
 - `src/scripts/` contiene la comprobación de versión de Node para las pruebas.

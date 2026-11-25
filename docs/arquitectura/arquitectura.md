@@ -6,13 +6,14 @@
 
 - `src/core` contiene los esquemas Zod de las entradas y las reglas puras de dinero, fecha, cuadre y conversión.
 - `src/server/ledger` ofrece la API de servicios TypeScript mediante `createLedger(db, actor)`. Usa Kysely para aplicar esas reglas a las cuentas, asientos, catálogos y consultas.
+- `src/server/mcp` publica herramientas en español tras OAuth. Valida los argumentos con Zod, delega en el dominio con el actor `claude` y devuelve datos estructurados y un resumen breve. Cada operación registrada incluye el ID para deshacerla.
 
 ## Stack tecnológico
 
 - Node.js 22 y TypeScript estricto con npm workspaces.
 - `core` proporciona el código compartido. `server` expone la API HTTP con Express. `web` usa React, Vite, Tailwind CSS y shadcn/ui.
 - MariaDB 10.6 almacena los datos en tablas InnoDB con `utf8mb4`. El servidor usa Kysely sobre un pool de `mysql2`.
-- Cada pool abre hasta 5 conexiones y admite hasta 64 solicitudes en espera. Cada conexión inicia con `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,ERROR_FOR_DIVISION_BY_ZERO` y zona horaria UTC. `/health` comparte y conserva el resultado de su comprobación durante 10 segundos. Su plazo total es de 1,5 segundos, incluso cuando espera una conexión.
+- El pool principal abre hasta 5 conexiones y el lector abre hasta 2. Cada pool admite hasta 64 solicitudes en espera. Cada conexión inicia con `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,ERROR_FOR_DIVISION_BY_ZERO` y zona horaria UTC. `/health` comparte y conserva el resultado de su comprobación durante 10 segundos. Su plazo total es de 1,5 segundos, incluso cuando espera una conexión.
 - Vitest ejecuta las pruebas, Supertest comprueba la API HTTP y Testing Library comprueba la interfaz. ESLint, TypeScript y Prettier verifican el código.
 
 ## Autenticación MCP
@@ -75,5 +76,7 @@ Deshacer bloquea la operación objetivo, verifica el estado actual de las filas 
 ## Consultas y migraciones
 
 La base de consulta contiene vistas `SQL SECURITY DEFINER` con columnas explícitas y `ALGORITHM=TEMPTABLE`, que impide actualizarlas. Así quedan fuera la bitácora y los objetos que se agreguen a la base principal. `v_accounts` incluye las cuentas archivadas con `archived_at`. `v_transactions`, `v_postings` y `v_transaction_tags` excluyen asientos borrados lógicamente. `v_postings` conserva el nombre y tipo de la cuenta e incluye la fecha contable del asiento. `v_custom_field_definitions` muestra solo las definiciones activas. Los valores JSON `custom` se reservan para la aplicación, lo que evita devolver valores de campos archivados.
+
+`consulta_sql` acepta una sentencia `SELECT` o `WITH` en una transacción de solo lectura. MariaDB aplica los permisos del usuario lector y un límite de 5 segundos por sentencia. La herramienta devuelve hasta 500 filas y 64 KB, con aviso si recorta. El catálogo de columnas documentado en la herramienta se genera a partir de las definiciones de las vistas.
 
 Las migraciones TypeScript viven en `src/server/migrations`. Se aplican hacia adelante en orden `AAAAMMDDHHMM_descripcion`. `npm run migrate` comprueba los permisos de triggers antes de inicializar Kysely. Después de aplicar las migraciones, recrea las vistas con el usuario de migración y elimina las vistas obsoletas cuyo nombre empieza por `v_`. El DDL de MariaDB puede dejar cambios parciales si falla una migración. El despliegue toma un volcado previo para recuperar la base principal.

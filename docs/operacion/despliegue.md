@@ -1,6 +1,6 @@
 # Despliegue en cPanel
 
-Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. El conector MCP usa OAuth y ofrece la herramienta `ping`.
+Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. El conector MCP usa OAuth y ofrece herramientas contables y `ping`.
 
 ## 1. Crea el subdominio y comprueba HTTPS
 
