@@ -1,0 +1,21 @@
+﻿# Changelog
+
+All notable changes to FinanceManager are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - sin fecha
+
+### Añadido
+
+- **Contabilidad:** cuentas, categorías, etiquetas, campos personalizados, partida doble, movimientos, transferencias multimoneda, conciliación, tipos de cambio y patrimonio.
+- **Préstamos:** préstamos hechos y recibidos, cálculo de interés simple y abonos.
+- **Interfaz MCP:** herramientas en español para registrar, consultar, importar lotes y deshacer; SQL de lectura sobre vistas.
+- **Operación:** autenticación OAuth 2.1 con TOTP, copias cifradas, restauración y despliegue en cPanel/Passenger.
+- **Calidad:** pruebas unitarias, HTTP, integración con MariaDB y suites Bash.
+
+### Seguridad
+
+- OAuth con PKCE, tokens revocables y autenticación de segundo factor.
+- Base de lectura separada con permisos limitados a vistas financieras.
+- Bitácora de auditoría y copias cifradas.
