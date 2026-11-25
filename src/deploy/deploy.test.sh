@@ -236,6 +236,14 @@ failed_backup="$DEPLOY_ROOT/${BASH_REMATCH[1]}"
 [[ -s $failed_backup ]] || fail 'S23: no se conservó el volcado'
 retry=$(sed -n 's/^Para reintentar la restauración, ejecuta: //p' <<< "$output")
 [[ $retry == *"$failed_backup"* ]] || fail 'S23: falta el comando con la ruta del volcado'
+grep -Fxq "Para reintentar la restauración, ejecuta: $retry" "$log" ||
+  fail 'M-007 S8: falta el comando de reintento en el log'
+release=${failed_backup##*/}
+release=${release%%.*}
+expected_commit=$(git -C "$DEPLOY_REPO_URL" rev-parse HEAD)
+[[ $(git -C "$DEPLOY_ROOT/repo" rev-parse "refs/finance/releases/$release") == "$expected_commit" &&
+   $retry == *"refs/finance/releases/$release"* ]] ||
+  fail 'M-007 S8: falta la ref estable del reintento'
 PATH="$DEPLOY_NODE_BIN:$PATH" bash -c "$retry" || fail 'S23: el comando de recuperación falló'
 [[ $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts' ]] || fail 'S23: el reintento dejó objetos ajenos al volcado'
 echo 'PASA M-003C S23'
@@ -263,6 +271,19 @@ done
 grep -Fq '[redactado] [redactado] [redactado] [redactado]' "$log" ||
   fail 'M-005 S11: falta el diagnóstico redactado'
 echo 'PASA M-005 S11'
+
+for day in {01..15}; do
+  touch "$DEPLOY_ROOT/shared/backups/200001$day-000000.fixture.sql"
+done
+touch "$DEPLOY_ROOT/shared/backups/manual.sql"
+deploy
+copies=("$DEPLOY_ROOT/shared/backups/"[0-9]*.sql)
+[[ ${#copies[@]} == 10 && -f "$failed_backup" &&
+   ! -e "$DEPLOY_ROOT/shared/backups/20000101-000000.fixture.sql" &&
+   -f "$DEPLOY_ROOT/shared/backups/manual.sql" ]] || fail 'M-007 S8: retención incorrecta'
+echo 'PASA M-007 S8'
+active=$(current)
+prior=$(readlink "$DEPLOY_ROOT/shared/previous")
 
 if HEALTH_BODY='{ "db": "unavailable" }' deploy; then fail 'S15: se aceptó db no disponible'; fi
 [[ $(current) == "$active" ]] || fail 'S15: no se restauró current tras fallar la BD'
@@ -302,10 +323,21 @@ done
 touch -t 202611240000 "$DEPLOY_ROOT/.deploy.lock"
 before=$(snapshot)
 second_status=0
+# Exercise the real lock while simulating the expiry of the requested 10 min.
+export REAL_FLOCK=$(command -v flock)
+cat > "$DEPLOY_NODE_BIN/flock" <<'EOF'
+#!/usr/bin/env bash
+[[ $1 == -w && $2 == 600 && $3 == 9 ]] || exit 2
+echo waited >> "$EVENTS.lock"
+exec "$REAL_FLOCK" -n "$3"
+EOF
+chmod +x "$DEPLOY_NODE_BIN/flock"
+export PATH="$DEPLOY_NODE_BIN:$PATH"
 output=$(deploy 2>&1) || second_status=$?
 after=$(snapshot)
 touch "$EVENTS.resume"
 if wait "$running"; then fail 'S17: el primer despliegue debía fallar en build'; fi
-[[ $second_status != 0 && $output == *'Ya hay un despliegue en curso'* ]] || fail 'S17: faltó el bloqueo concurrente'
+[[ $second_status != 0 && $output == *'10 minutos'* &&
+   $(cat "$EVENTS.lock") == waited ]] || fail 'S17 / M-007 S7: faltó el bloqueo concurrente'
 [[ $after == "$before" ]] || fail 'S17: el segundo despliegue modificó el árbol'
 echo 'PASA S17'

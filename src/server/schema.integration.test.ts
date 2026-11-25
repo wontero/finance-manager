@@ -681,7 +681,7 @@ test("S18: reporting shows archived accounts, posting details and active transac
   }
 }, 15_000);
 
-test("S20: the deploy backup restores data, views, foreign keys, virtual columns and triggers", async () => {
+async function checkRestore(encrypted: boolean) {
   const fixture = await mkdtemp(join(tmpdir(), "finance-restore-"));
   const { host, port, user, password } = localDatabase(
     "MIGRATION_DATABASE_URL",
@@ -726,71 +726,169 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
       `[client]\nhost=${host}\nport=${port}\nuser=${JSON.stringify(user)}\npassword=${JSON.stringify(password)}\n`,
       { mode: 0o600 },
     );
-    await migration.query(
-      "CREATE VIEW restore_fixture AS SELECT id, active_parent_id FROM accounts",
-    );
-    await migration.query(
-      "CREATE TRIGGER restore_fixture_trigger BEFORE INSERT ON tags FOR EACH ROW SET NEW.name = CONCAT(NEW.name, '!')",
-    );
-    await migration.query("INSERT INTO tags (name) VALUES ('Ida y vuelta')");
-    await migration.execute(
-      "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Ida y vuelta!'",
-      [transaction],
-    );
-    await migration.execute(
-      "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
-      [transaction, reportingAccount, "9007199254740993"],
-    );
-    await migration.execute(
-      "INSERT INTO audit_log (operation_id, table_name, row_id, action, `after`) VALUES (?, 'transactions', ?, 'insert', '{}')",
-      [uuid, transaction],
-    );
-    await migration.execute("UPDATE transactions SET custom = ? WHERE id = ?", [
-      JSON.stringify({ label: "prueba ñ", lines: ["a\nb", "DELIMITER ;;"] }),
-      transaction,
-    ]);
-    const before = dump();
-    const readonlyDefinitions = () =>
-      Promise.all(
-        views.map(
-          async (view) =>
-            (
-              await migration.query(
-                `SHOW CREATE VIEW ${readOnlySchema}.${view}`,
-              )
-            )[0],
-        ),
+    // Windows runs Bash, flock and GPG in WSL and uses the host database clients.
+    const bash = (command: string, ...args: string[]) =>
+      execFileSync(
+        windows ? "wsl.exe" : "bash",
+        [
+          ...(windows ? ["--exec", "bash"] : []),
+          "-c",
+          command,
+          "m007",
+          ...args,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+    let backupRoot: string | undefined;
+    const daily = (command: string) =>
+      bash(
+        `set -euo pipefail
+        export DEPLOY_ROOT=$1 DEPLOY_DB_NAME=finance_test BACKUP_RCLONE_REMOTE=
+        export GNUPGHOME="$1/gnupg" TMPDIR="$1/tmp"
+        script=$2
+        export DEPLOY_DB_OPTIONS=$3
+        if [[ -n $4 ]]; then
+          script=$(wslpath -u "$2")
+          export DEPLOY_DB_OPTIONS=$(wslpath -u "$3")
+          export TEST_MARIA_BIN=$(wslpath -u "$4") TEST_NODE=$(wslpath -u "$5")
+          export PATH="$1/bin:$PATH"
+        fi
+        ${command}`,
+        backupRoot!,
+        shellPath(resolve("src/deploy/backup.sh")),
+        options,
+        clientDir ? shellPath(clientDir) : "",
+        shellPath(process.execPath),
       );
-    const beforeViews = await readonlyDefinitions();
-    invoke("backup_database");
-    await migration.query("DROP VIEW restore_fixture");
-    await migration.query("CREATE TABLE orphan (id INT)");
-    await migration.query("DELETE FROM transaction_tags");
-    await migration.query("DELETE FROM tags");
-    invoke("restore_database");
-    expect(dump().equals(before)).toBe(true);
-    expect(await readonlyDefinitions()).toEqual(beforeViews);
-    expect(
-      (
-        await reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
+    if (encrypted) {
+      backupRoot = bash("mktemp -d");
+      try {
+        daily(`umask 077
+          mkdir "$1"/{shared,gnupg,tmp,bin}
+          touch "$1/shared/.env"
+          gpg --gen-random --armor 2 32 > "$1/shared/backup.passphrase"
+          if [[ -n $4 ]]; then
+            cat > "$1/bin/mysql" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+name=\${0##*/}
+options=$(wslpath -w "\${1#--defaults-file=}")
+shift
+if [[ $name == mysql && $* == *--skip-column-names* ]]; then
+  "$TEST_MARIA_BIN/$name.exe" "--defaults-file=$options" "$@" | sed 's/\\r$//'
+  exit
+fi
+exec "$TEST_MARIA_BIN/$name.exe" "--defaults-file=$options" "$@"
+SH
+            cat > "$1/bin/node" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+options=
+if [[ -n $4 ]]; then options=$(wslpath -w "$4"); fi
+exec "$TEST_NODE" "$1" "$2" "$(wslpath -w "$3")" "$options" "$(wslpath -w "$5")"
+SH
+            chmod +x "$1/bin/"*
+            ln -s mysql "$1/bin/mysqldump"
+          fi`);
+      } catch (error) {
+        bash('rm -r -- "$1"', backupRoot);
+        throw error;
+      }
+    }
+    try {
+      await migration.query(
+        "CREATE VIEW restore_fixture AS SELECT id, active_parent_id FROM accounts",
+      );
+      await migration.query(
+        "CREATE TRIGGER restore_fixture_trigger BEFORE INSERT ON tags FOR EACH ROW SET NEW.name = CONCAT(NEW.name, '!')",
+      );
+      await migration.query("INSERT INTO tags (name) VALUES ('Ida y vuelta')");
+      await migration.execute(
+        "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Ida y vuelta!'",
+        [transaction],
+      );
+      await migration.execute(
+        "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
+        [transaction, reportingAccount, "9007199254740993"],
+      );
+      await migration.execute(
+        "INSERT INTO audit_log (operation_id, table_name, row_id, action, `after`) VALUES (?, 'transactions', ?, 'insert', '{}')",
+        [uuid, transaction],
+      );
+      await migration.execute(
+        "UPDATE transactions SET custom = ? WHERE id = ?",
+        [
+          JSON.stringify({
+            label: "prueba ñ",
+            lines: ["a\nb", "DELIMITER ;;"],
+          }),
           transaction,
-        ])
-      )[0],
-    ).toHaveLength(1);
-    expect((await migration.query("SELECT name FROM tags"))[0]).toEqual([
-      { name: "Ida y vuelta!" },
-    ]);
-    await expect(
-      migration.query("DELETE FROM audit_log"),
-    ).rejects.toMatchObject({
-      sqlState: "45000",
-    });
-    await expect(
-      migration.execute(
-        "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BAD', 1)",
-        [transaction, reportingAccount],
-      ),
-    ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
+        ],
+      );
+      const before = dump();
+      const readonlyDefinitions = () =>
+        Promise.all(
+          views.map(
+            async (view) =>
+              (
+                await migration.query(
+                  `SHOW CREATE VIEW ${readOnlySchema}.${view}`,
+                )
+              )[0],
+          ),
+        );
+      const beforeViews = await readonlyDefinitions();
+      if (encrypted) {
+        daily(
+          'bash "$script" run; files=("$1"/shared/backups/daily/*.sql.gz.gpg); [[ ${#files[@]} == 1 ]]; bash "$script" verify "${files[0]}"',
+        );
+      } else {
+        invoke("backup_database");
+      }
+      await migration.query("DROP VIEW restore_fixture");
+      await migration.query("CREATE TABLE orphan (id INT)");
+      await migration.query("DELETE FROM transaction_tags");
+      await migration.query("DELETE FROM tags");
+      if (encrypted) {
+        daily(
+          'files=("$1"/shared/backups/daily/*.sql.gz.gpg); bash "$script" restore "${files[0]}" --yes',
+        );
+        await migration.query("DROP VIEW finance_test_ro.v_tags");
+        expect(migrate()).toMatch(/Sin migraciones pendientes/);
+      } else {
+        invoke("restore_database");
+      }
+      expect(dump().equals(before)).toBe(true);
+      expect(await readonlyDefinitions()).toEqual(beforeViews);
+      expect(
+        (
+          await reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
+            transaction,
+          ])
+        )[0],
+      ).toHaveLength(1);
+      expect((await migration.query("SELECT name FROM tags"))[0]).toEqual([
+        { name: "Ida y vuelta!" },
+      ]);
+      await expect(
+        migration.query("DELETE FROM audit_log"),
+      ).rejects.toMatchObject({
+        sqlState: "45000",
+      });
+      await expect(
+        migration.execute(
+          "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BAD', 1)",
+          [transaction, reportingAccount],
+        ),
+      ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
+    } finally {
+      if (backupRoot) bash('rm -r -- "$1"', backupRoot);
+      await migration.query("DROP VIEW IF EXISTS restore_fixture");
+      await migration.query(
+        "DELETE tt FROM transaction_tags tt JOIN tags t ON t.id = tt.tag_id WHERE t.name = 'Ida y vuelta!'",
+      );
+      await migration.query("DELETE FROM tags WHERE name = 'Ida y vuelta!'");
+    }
   } finally {
     try {
       await migration.query("DROP TRIGGER IF EXISTS restore_fixture_trigger");
@@ -798,7 +896,20 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
       await rm(fixture, { recursive: true, force: true });
     }
   }
-}, 30_000);
+}
+
+test(
+  "S20: the deploy backup restores data, views, foreign keys, virtual columns and triggers",
+  () => checkRestore(false),
+  30_000,
+);
+test.skipIf(
+  process.platform === "win32" && process.env.FINANCE_TEST_WSL_BACKUP !== "1",
+)(
+  "M-007 S6: GPG backup, verify and restore round trip with MariaDB",
+  () => checkRestore(true),
+  60_000,
+);
 
 ledgerSpecs(() => ({ migration, reader }));
 authSpecs(() => ({ app, reader }));

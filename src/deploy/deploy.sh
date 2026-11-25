@@ -1,10 +1,84 @@
 #!/usr/bin/env bash
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+redact_errors() {
+  local first_line
+  IFS= read -r first_line || [[ -n $first_line ]] || return 0
+  { printf '%s\n' "$first_line"; cat; } | DEPLOY_DIAGNOSTIC_REMOTE="$repo_url" node -e '
+    const { execFileSync } = require("node:child_process");
+    const { readFileSync } = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const [envFile, options, passphraseFile] = process.argv.slice(1);
+    const secrets = new Set();
+    function addSecret(value) {
+      if (!value) return;
+      secrets.add(value);
+      secrets.add(JSON.stringify(value).slice(1, -1));
+      secrets.add(encodeURIComponent(value));
+    }
+    function addCredential(value) {
+      addSecret(value);
+      try { addSecret(decodeURIComponent(value)); } catch { /* Literal percent sign. */ }
+    }
+    function addUrl(value, git = false) {
+      let url;
+      try { url = new URL(value); } catch { return; }
+      addCredential(url.password);
+      if (git && /^https?:$/.test(url.protocol)) addCredential(url.username);
+    }
+    try {
+      let errors = readFileSync(0, "utf8");
+      if (!errors) process.exit(0);
+      const env = parseEnv(readFileSync(envFile, "utf8"));
+      for (const source of [process.env, env]) {
+        addUrl(source.DATABASE_URL);
+        addUrl(source.MIGRATION_DATABASE_URL);
+        addUrl(source.READONLY_DATABASE_URL);
+        for (const [name, value] of Object.entries(source)) {
+          if (/PASSWORD|PASSWD|MYSQL_PWD|TOKEN|SECRET|KEY/i.test(name)) addSecret(value);
+        }
+      }
+      addUrl(process.env.DEPLOY_DIAGNOSTIC_REMOTE, true);
+      if (passphraseFile) addSecret(readFileSync(passphraseFile, "utf8").split(/\r?\n/, 1)[0]);
+      if (options) {
+        const defaults = execFileSync("my_print_defaults", [
+          `--defaults-file=${options}`, "mysqldump", "mariadb-dump", "mysql",
+          "mariadb-client", "mariadb", "client", "client-server", "client-mariadb",
+        ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        for (const line of defaults.split(/\r?\n/)) {
+          if (line && !line.startsWith("--")) throw new Error();
+          if (/^--password[1-3]?=/.test(line)) addSecret(line.slice(line.indexOf("=") + 1));
+        }
+      }
+      for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+        errors = errors.replaceAll(secret, "[redactado]");
+      }
+      process.stdout.write(errors);
+    } catch {
+      console.log("Diagnóstico omitido: no se pudieron filtrar las credenciales.");
+    }
+  ' "$shared/.env" "${options:-}" "${passphrase_file:-}"
+}
+
+run_logged() {
+  local -a result
+  "$@" 2>&1 1>&3 | redact_errors >> "$log"
+  result=("${PIPESTATUS[@]}")
+  if (( result[1] != 0 )); then echo "No se pudo guardar el diagnóstico en $log." >&2; fi
+  return "${result[0]}"
+} 3>&1
+
+wait_for_deploy_lock() {
+  exec 9<>"$lock"
+  flock -w 600 9 || fail 'El bloqueo compartido de despliegue y copias sigue ocupado tras esperar 10 minutos.'
+}
+
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
 set -euo pipefail
 umask 022
 export LC_ALL=C
 export PATH="${DEPLOY_NODE_BIN:-/opt/cpanel/ea-nodejs22/bin}:$PATH"
-
-fail() { printf '%s\n' "$*" >&2; exit 1; }
 
 root=$(realpath -m "${DEPLOY_ROOT:-$HOME/apps/finanzasmateo}")
 releases=$(realpath -m "${DEPLOY_RELEASES_DIR:-$root/releases}")
@@ -37,8 +111,7 @@ reject_active_bootstrap() {
 
 [[ -e $lock ]] || reject_active_bootstrap
 mkdir -p -- "$root"
-exec 9<>"$lock"
-flock -n 9 || fail 'Ya hay un despliegue en curso.'
+wait_for_deploy_lock
 
 release_path() {
   [[ ${1%/*} == "$releases" && ${1##*/} =~ ^[0-9]{8}-[0-9]{6}$ && -d $1 && ! -L $1 ]]
@@ -170,70 +243,6 @@ done
 (umask 077; set -o noclobber; : > "$log")
 chmod 600 -- "$log"
 
-redact_errors() {
-  DEPLOY_DIAGNOSTIC_REMOTE="$repo_url" node -e '
-    const { execFileSync } = require("node:child_process");
-    const { readFileSync } = require("node:fs");
-    const { parseEnv } = require("node:util");
-    const [envFile, options] = process.argv.slice(1);
-    const secrets = new Set();
-    function addSecret(value) {
-      if (!value) return;
-      secrets.add(value);
-      secrets.add(JSON.stringify(value).slice(1, -1));
-      secrets.add(encodeURIComponent(value));
-    }
-    function addCredential(value) {
-      addSecret(value);
-      try { addSecret(decodeURIComponent(value)); } catch { /* Literal percent sign. */ }
-    }
-    function addUrl(value, git = false) {
-      let url;
-      try { url = new URL(value); } catch { return; }
-      addCredential(url.password);
-      if (git && /^https?:$/.test(url.protocol)) addCredential(url.username);
-    }
-    try {
-      let errors = readFileSync(0, "utf8");
-      if (!errors) process.exit(0);
-      const env = parseEnv(readFileSync(envFile, "utf8"));
-      for (const source of [process.env, env]) {
-        addUrl(source.DATABASE_URL);
-        addUrl(source.MIGRATION_DATABASE_URL);
-        addUrl(source.READONLY_DATABASE_URL);
-        for (const [name, value] of Object.entries(source)) {
-          if (/PASSWORD|PASSWD|MYSQL_PWD|TOKEN|SECRET|KEY/i.test(name)) addSecret(value);
-        }
-      }
-      addUrl(process.env.DEPLOY_DIAGNOSTIC_REMOTE, true);
-      if (options) {
-        const defaults = execFileSync("my_print_defaults", [
-          `--defaults-file=${options}`, "mysqldump", "mariadb-dump", "mysql",
-          "mariadb-client", "mariadb", "client", "client-server", "client-mariadb",
-        ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-        for (const line of defaults.split(/\r?\n/)) {
-          if (line && !line.startsWith("--")) throw new Error();
-          if (/^--password[1-3]?=/.test(line)) addSecret(line.slice(line.indexOf("=") + 1));
-        }
-      }
-      for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
-        errors = errors.replaceAll(secret, "[redactado]");
-      }
-      process.stdout.write(errors);
-    } catch {
-      console.log("Diagnóstico omitido: no se pudieron filtrar las credenciales.");
-    }
-  ' "$shared/.env" "${options:-}"
-}
-
-run_logged() {
-  local -a result
-  "$@" 2>&1 1>&3 | redact_errors >> "$log"
-  result=("${PIPESTATUS[@]}")
-  if (( result[1] != 0 )); then echo "No se pudo guardar el diagnóstico en $log." >&2; fi
-  return "${result[0]}"
-} 3>&1
-
 [[ -d $repo ]] || git init --quiet --bare "$repo"
 run_logged git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" ||
   fail "No se pudo descargar la ref. Revisa la URL, la ref y la deploy key. Log: $log"
@@ -276,11 +285,22 @@ ln -s -- "$shared/logs" "$staged/logs"
       rm -f -- "$backup"
       fail "Falló la copia de MariaDB. No se ejecutó la migración. Log: $log"
     fi
+    shopt -s nullglob
+    copies=("$shared/backups/"*.sql)
+    keep=0
+    for ((i = ${#copies[@]} - 1; i >= 0; i--)); do
+      copy=${copies[i]}
+      [[ -f $copy && ! -L $copy && ${copy##*/} =~ ^[0-9]{8}-[0-9]{6}\.[[:alnum:]]+\.sql$ ]] || continue
+      if (( ++keep > 10 )); then rm -- "$copy"; fi
+    done
+    retry_ref="refs/finance/releases/$release"
+    run_logged git -C "$repo" update-ref "$retry_ref" "$release_commit" ||
+      fail "No se pudo guardar la referencia para recuperar la migración. Log: $log"
     if ! run_logged npm run migrate >/dev/null; then
       if ! restore_database >/dev/null; then
         echo "Fallaron la migración y la restauración. Advertencia: la base principal puede haber quedado parcial y sin triggers de bitácora. Conserva el volcado $backup. Log: $log" >&2
-        # The failed release is removed on exit. Reload its restore code by commit.
-        printf 'Para reintentar la restauración, ejecuta: flock -n -- %q bash -c %q _ %q %q %q %q %q\n' \
+        # The failed release is removed on exit. Keep its restore code reachable.
+        retry=$(printf 'Para reintentar la restauración, ejecuta: flock -w 600 -- %q bash -c %q _ %q %q %q %q %q' \
           "$lock" 'set -euo pipefail
 dir=$(mktemp -d)
 cleanup_retry() { rm -rf -- "$dir"; }
@@ -289,11 +309,15 @@ git -C "$1" archive "$2" src/deploy/database.sh src/deploy/trigger-preflight.sql
 source "$dir/src/deploy/database.sh"
 options=$3 database=$4 backup=$5
 run_logged() { "$@"; }
-restore_database' "$repo" "$release_commit" "$options" "$database" "$backup" >&2
+restore_database' "$repo" "$retry_ref" "$options" "$database" "$backup")
+        printf '%s\n' "$retry" >&2
+        printf '%s\n' "$retry" >> "$log"
         exit 1
       fi
+      run_logged git -C "$repo" update-ref -d "$retry_ref" "$release_commit" || true
       fail "Falló la migración. Se restauró la copia de MariaDB y current no cambió. Log: $log"
     fi
+    run_logged git -C "$repo" update-ref -d "$retry_ref" "$release_commit" || true
   fi
 )
 

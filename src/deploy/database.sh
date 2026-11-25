@@ -32,14 +32,25 @@ require_trigger_privileges() {
 }
 
 backup_database() {
+  if [[ -n ${backup:-} ]]; then
+    dump_database > "$backup"
+  else
+    dump_database
+  fi
+}
+
+dump_database() {
   require_trigger_privileges || return 1
   local -a dump=(mysqldump --defaults-file="$options" --single-transaction
     --tz-utc --default-character-set=utf8mb4 --no-create-db --skip-add-drop-database --skip-force
     --skip-add-locks --skip-disable-keys)
   # Keep trigger definitions after all table data, including data from later tables.
-  run_logged "${dump[@]}" --skip-triggers "$database" > "$backup" &&
-    [[ -s $backup ]] &&
-    run_logged "${dump[@]}" --triggers --no-data --no-create-info "$database" >> "$backup"
+  run_logged "${dump[@]}" --skip-triggers "$database" |
+    awk '1; END { if (!NR) exit 1 }' || return 1
+  if [[ -z ${backup:-} ]]; then
+    printf '%s\n' '-- FinanceManager: triggers' || return 1
+  fi
+  run_logged "${dump[@]}" --triggers --no-data --no-create-info "$database"
 }
 
 restore_database() {
