@@ -13,47 +13,6 @@ import * as database from "./database.js";
 const version = "m002-test";
 const app = createApp(readConfig({ APP_VERSION: version }));
 
-function postMcp(method: string, params: object = {}) {
-  return request(app)
-    .post("/mcp")
-    .set("Accept", "application/json, text/event-stream")
-    .send({ jsonrpc: "2.0", id: 1, method, params });
-}
-
-test("S1: initialize responds with JSON and no MCP session", async () => {
-  const response = await postMcp("initialize", {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "integration-client", version: "1" },
-  });
-  expect(response.status).toBe(200);
-  expect(response.headers["content-type"]).toMatch(/^application\/json/);
-  expect(response.headers["mcp-session-id"]).toBeUndefined();
-  expect(response.body.result.serverInfo).toEqual({
-    name: "Finance Manager",
-    version,
-  });
-});
-
-test("S2: tools/list has exactly one read-only tool", async () => {
-  const response = await postMcp("tools/list");
-  expect(response.status).toBe(200);
-  expect(response.body.result.tools).toMatchObject([
-    { name: "ping", annotations: { readOnlyHint: true } },
-  ]);
-});
-
-test("S3: ping returns pong, the version and an ISO timestamp", async () => {
-  const response = await postMcp("tools/call", { name: "ping", arguments: {} });
-  expect(response.status).toBe(200);
-  const [content] = response.body.result.content;
-  expect(content.type).toBe("text");
-  const { message, version: reportedVersion, time } = JSON.parse(content.text);
-  expect(message).toBe("pong");
-  expect(reportedVersion).toBe(version);
-  expect(new Date(time).toISOString()).toBe(time);
-});
-
 test("S4: GET and DELETE cannot open an MCP session", async () => {
   await request(app).get("/mcp").expect(405).expect("Allow", "POST");
   await request(app).delete("/mcp").expect(405).expect("Allow", "POST");

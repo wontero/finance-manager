@@ -3,17 +3,20 @@ import { APP_NAME } from "@finance-manager/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
+import { installAuth } from "./auth-http.js";
 import type { readConfig } from "./config.js";
 import { checkDatabase, createDatabase } from "./database.js";
 
 type Config = ReturnType<typeof readConfig>;
 
 export function createApp(
-  { database, webDistDir, version }: Config,
+  { auth, database, webDistDir, version }: Config,
   release?: string,
+  connection = database && createDatabase(database),
 ) {
   const app = express();
-  const pool = database && createDatabase(database).pool;
+  const pool = connection?.pool;
+  const requireAuth = installAuth(app, auth, connection?.db);
   let probe: ReturnType<typeof checkDatabase> | undefined;
   let expiresAt = Infinity;
 
@@ -34,7 +37,7 @@ export function createApp(
     });
   });
 
-  app.post("/mcp", express.json(), async (request, response) => {
+  app.post("/mcp", requireAuth, express.json(), async (request, response) => {
     const server = new McpServer({ name: APP_NAME, version });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

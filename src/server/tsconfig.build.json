@@ -6,5 +6,5 @@
     "outDir": "dist"
   },
   "include": ["*.ts", "migrations/*.ts", "ledger/*.ts"],
-  "exclude": ["*.test.ts", "ledger/ledger-specs.ts"]
+  "exclude": ["*.test.ts", "auth-specs.ts", "ledger/ledger-specs.ts"]
 }

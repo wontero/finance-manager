@@ -11,6 +11,7 @@ import {
   type RowDataPacket,
 } from "mysql2/promise";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
 import {
@@ -799,3 +800,4 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
 }, 30_000);
 
 ledgerSpecs(() => ({ migration, reader }));
+authSpecs(() => ({ app, reader }));
