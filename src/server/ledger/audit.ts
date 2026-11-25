@@ -14,6 +14,7 @@ const primaryKeys = {
   accounts: ["id"],
   transactions: ["id"],
   postings: ["id"],
+  loans: ["id"],
   tags: ["id"],
   transaction_tags: ["transaction_id", "tag_id"],
   custom_field_definitions: ["id"],
@@ -37,6 +38,7 @@ const foreignKeys = [
   ["accounts", "parent_id", "accounts"],
   ["postings", "account_id", "accounts"],
   ["postings", "transaction_id", "transactions"],
+  ["loans", "account_id", "accounts"],
   ["transaction_tags", "transaction_id", "transactions"],
   ["transaction_tags", "tag_id", "tags"],
 ] as const; // Solo referencias a filas que el dominio puede borrar al deshacer.

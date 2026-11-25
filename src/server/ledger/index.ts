@@ -10,6 +10,7 @@ import type { z } from "zod";
 import * as accounts from "./accounts.js";
 import { utcStamp, writeLedger, type LedgerWrite } from "./audit.js";
 import { findExchangeRate, saveExchangeRate } from "./metadata.js";
+import * as loans from "./loans.js";
 import {
   getAccountTotal,
   getCategoryTotals,
@@ -44,6 +45,20 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       "Crear cuenta",
       accounts.createAccount,
     ),
+    registerLoan: mutate(
+      ledgerInputs.registerLoan,
+      "Registrar préstamo",
+      loans.registerLoan,
+    ),
+    payLoan: mutate(ledgerInputs.payLoan, "Abonar préstamo", loans.payLoan),
+    getLoan(input: LedgerInput<"getLoan">) {
+      const value = parseLedgerInput(ledgerInputs.getLoan, input);
+      return read((trx) => loans.getLoan(trx, value));
+    },
+    listLoans(input: LedgerInput<"listLoans"> = {}) {
+      const value = parseLedgerInput(ledgerInputs.listLoans, input);
+      return read((trx) => loans.listLoans(trx, value));
+    },
     createCategory: mutate(
       ledgerInputs.createCategory,
       "Crear categoría",

@@ -13,6 +13,7 @@ import {
   currencyAccount,
   minorUnit,
   recordAdjustment,
+  rejectLoanAccounts,
 } from "./transactions.js";
 
 async function mutableAccount(write: LedgerWrite, id: string) {
@@ -131,6 +132,7 @@ export async function moveAccount(
   id: string,
   parentId: string | null,
 ) {
+  await rejectLoanAccounts(write.db, [id]);
   const account = await mutableAccount(write, id);
   await parentOfKind(write, parentId, account.kind);
   await rejectCycle(write, id, parentId);

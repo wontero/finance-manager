@@ -30,6 +30,26 @@ export type LedgerDatabase = {
     undoes_operation_id: Generated<string | null>;
     created_at: Generated<string>;
   };
+  loans: {
+    id: Generated<string>;
+    account_id: string;
+    direction: LedgerInput<"registerLoan">["direction"];
+    counterparty: string;
+    currency: string;
+    principal: string;
+    start_date: string;
+    rate: string;
+    rate_period: LedgerInput<"registerLoan">["ratePeriod"];
+    due_date: Generated<string | null>;
+    notes: Generated<string | null>;
+    last_payment_date: Generated<string | null>;
+    principal_paid: Generated<string>;
+    interest_paid: Generated<string>;
+    interest_carry: Generated<string>;
+    closed_at: Generated<string | null>;
+    created_at: Generated<string>;
+    updated_at: Generated<string>;
+  };
   transactions: {
     id: Generated<string>;
     date: string;
@@ -82,6 +102,7 @@ export type LedgerDatabase = {
 export type Account = Selectable<LedgerDatabase["accounts"]>;
 export type Posting = Selectable<LedgerDatabase["postings"]>;
 export type ExchangeRate = Selectable<LedgerDatabase["exchange_rates"]>;
+export type Loan = Selectable<LedgerDatabase["loans"]>;
 
 export const systemAccounts = {
   income: "Ingresos",

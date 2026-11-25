@@ -73,6 +73,21 @@ export async function minorUnit(db: Kysely<LedgerDatabase>, currency: string) {
   return row.minor_unit;
 }
 
+export async function rejectLoanAccounts(
+  db: Kysely<LedgerDatabase>,
+  ids: string[],
+) {
+  const loan = await db
+    .selectFrom("loans")
+    .select("id")
+    .where("account_id", "in", ids)
+    .executeTakeFirst();
+  if (loan)
+    throw new Error(
+      `La cuenta pertenece al préstamo ${loan.id}. Usa abonar_prestamo o deshacer_operacion.`,
+    );
+}
+
 function validatePostingAccount(account: Account, currency: string) {
   requireActive(account);
   if (
@@ -89,12 +104,14 @@ function validatePostingAccount(account: Account, currency: string) {
 }
 
 async function prepareLines(db: Kysely<LedgerDatabase>, lines: Line[]) {
+  const ids = [...new Set(lines.map((line) => line.accountId))];
+  await rejectLoanAccounts(db, ids);
   const accounts = new Map(
     (
       await db
         .selectFrom("accounts")
         .selectAll()
-        .where("id", "in", [...new Set(lines.map((line) => line.accountId))])
+        .where("id", "in", ids)
         .execute()
     ).map((account) => [account.id, account]),
   );
@@ -227,22 +244,27 @@ export async function recordAdjustment(
   offsetName: string,
   entry: { date: string; description: string },
 ) {
+  await rejectLoanAccounts(write.db, [account.id]);
   const offset = await systemAccount(write.db, offsetName);
   const signed = account.kind === "liability" ? -amount : amount;
-  const lines = [
-    {
-      account_id: account.id,
-      currency: account.currency,
-      amount: signed,
-      memo: null,
-    },
-    {
-      account_id: offset,
-      currency: account.currency,
-      amount: -signed,
-      memo: null,
-    },
-  ];
+  return recordBalancedEntry(write, entry, account.currency, [
+    { accountId: account.id, amount: signed },
+    { accountId: offset, amount: -signed },
+  ]);
+}
+
+export function recordBalancedEntry(
+  write: LedgerWrite,
+  entry: Entry & { date: string },
+  currency: string,
+  postings: { accountId: string; amount: bigint }[],
+) {
+  const lines = postings.map(({ accountId, amount }) => ({
+    account_id: accountId,
+    currency,
+    amount,
+    memo: null,
+  }));
   assertBalanced(lines);
   return insertEntry(
     write,
@@ -255,11 +277,21 @@ export async function recordAdjustment(
 async function activeEntry(db: Kysely<LedgerDatabase>, id: string) {
   const entry = await db
     .selectFrom("transactions")
-    .select("id")
+    .select("operation_id")
     .where("id", "=", id)
     .where("deleted_at", "is", null)
     .executeTakeFirst();
   if (!entry) throw new Error(`El asiento ${id} no existe o está borrado.`);
+  const loan = await db
+    .selectFrom("audit_log")
+    .select("row_id")
+    .where("operation_id", "=", entry.operation_id)
+    .where("table_name", "=", "loans")
+    .executeTakeFirst();
+  if (loan)
+    throw new Error(
+      `El asiento pertenece al préstamo ${loan.row_id}. Usa deshacer_operacion para corregirlo.`,
+    );
   const archived = await db
     .selectFrom("postings as p")
     .innerJoin("accounts as a", "a.id", "p.account_id")

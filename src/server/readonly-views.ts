@@ -44,6 +44,25 @@ const readonlyViews = {
     "type",
     "options",
   ],
+  v_loans: [
+    "id",
+    "account_id",
+    "direction",
+    "counterparty",
+    "currency",
+    "principal",
+    "start_date",
+    "rate",
+    "rate_period",
+    "due_date",
+    "notes",
+    "last_payment_date",
+    "principal_paid",
+    "interest_paid",
+    "closed_at",
+    "created_at",
+    "updated_at",
+  ],
 } satisfies Record<string, (string | [alias: string, source: string])[]>;
 
 const columnName = (column: string | [string, string]) =>
@@ -72,6 +91,7 @@ export async function createReadonlyViews(
       WHERE t.deleted_at IS NULL`,
     v_exchange_rates: sql`FROM ${table("exchange_rates")}`,
     v_custom_field_definitions: sql`FROM ${table("custom_field_definitions")} WHERE archived_at IS NULL`,
+    v_loans: sql`FROM ${table("loans")}`,
   } satisfies Record<keyof typeof readonlyViews, unknown>;
   const { rows: existing } = await sql<{ name: string }>`
     SELECT TABLE_NAME AS name FROM information_schema.VIEWS
