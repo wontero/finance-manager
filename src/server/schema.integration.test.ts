@@ -12,6 +12,7 @@ import {
   type RowDataPacket,
 } from "mysql2/promise";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { dashboardSpecs } from "./dashboard-specs.js";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
 import { createLedger } from "./ledger/index.js";
@@ -48,6 +49,7 @@ const tables = [
   "tags",
   "transaction_tags",
   "transactions",
+  "web_sessions",
 ];
 const views = [
   "v_accounts",
@@ -1008,3 +1010,4 @@ test.skipIf(
 ledgerSpecs(() => ({ migration, reader }));
 authSpecs(() => ({ app, reader }));
 mcpSpecs(() => migration, schema, readOnlySchema);
+dashboardSpecs(schema);

@@ -357,3 +357,9 @@ Ensaya la copia y restauración en una base desechable y detén las escrituras y
 - **La restauración falló**. Mantén detenidas las escrituras. La base principal puede haber quedado parcial y sin triggers de bitácora. Corrige la causa del error y ejecuta el comando de reintento que queda en stderr y en el log. El comando usa la referencia guardada en el repositorio local y el volcado conservado. Consulta el procedimiento de [recuperación](recuperacion.md).
 - **MariaDB rechaza crear triggers con el error 1419**. Pide al proveedor que compruebe la configuración de registro binario y si permite a la cuenta de migración crear y restaurar los triggers. [Variables del registro binario de MariaDB](https://mariadb.com/docs/server/ha-and-performance/standard-replication/replication-and-binary-log-system-variables#log_bin_trust_function_creators)
 - **MCP falla**. Comprueba la URL completa y los endpoints de OAuth del paso 6. Revisa que el conector esté habilitado en el chat y que el celular use la misma cuenta y espacio de trabajo.
+
+## Sesiones del dashboard
+
+El despliegue aplica la migración `web_sessions` durante el paso habitual de migración, antes de activar el release. Usa el origen HTTPS público en `PUBLIC_URL` para que el navegador envíe la cookie segura y las solicitudes de escritura superen la comprobación de origen.
+
+Para cerrar todas las sesiones web y revocar también las conexiones OAuth vigentes, entra al release activo con el entorno de Node.js de la aplicación y ejecuta `npm run auth:tokens -- revoke-all`. Los usuarios deben volver a iniciar sesión. `npm run auth:setup` también revoca todas las sesiones al reemplazar las credenciales.

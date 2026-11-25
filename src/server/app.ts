@@ -1,9 +1,10 @@
-import { extname, join } from "node:path";
+import { extname } from "node:path";
 import { APP_NAME } from "@finance-manager/core";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { installAuth } from "./auth-http.js";
 import type { readConfig } from "./config.js";
+import { dashboardApi } from "./dashboard-http.js";
 import { checkDatabase, createDatabase } from "./database.js";
 import { createMcp } from "./mcp/index.js";
 
@@ -61,12 +62,13 @@ export function createApp(
     response.set("Allow", "POST").sendStatus(405);
   });
 
+  app.use("/api", dashboardApi(auth, connection?.db));
   app.use(express.static(webDistDir));
   app.get("/{*path}", (request, response, next) => {
     const segments = request.params.path;
     if (segments?.[0] === "assets" || extname(segments?.at(-1) ?? ""))
       return next();
-    response.sendFile(join(webDistDir, "index.html"));
+    response.sendFile("index.html", { root: webDistDir });
   });
 
   return app;

@@ -4,6 +4,10 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ## [Unreleased]
 
+### Añadido
+
+- Dashboard web con inicio de sesión, resumen, movimientos con filtros, informes y deshacer desde la actividad.
+
 ### Corregido
 
 - La comprobación de salud del despliegue usa un User-Agent propio para evitar el rechazo de ModSecurity al User-Agent por defecto de `curl`.

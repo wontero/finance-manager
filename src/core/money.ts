@@ -102,3 +102,19 @@ export function assertBalanced(
       throw new Error(`El asiento está descuadrado en ${currency}.`);
   }
 }
+
+export function decimalMoney(
+  amount: bigint,
+  moneda: string,
+  scales: ReadonlyMap<string, number>,
+) {
+  const scale = scales.get(moneda);
+  if (scale === undefined)
+    throw new Error(`Falta la unidad mínima de ${moneda}.`);
+  const formatted = formatAmount(amount, moneda, scale);
+  return {
+    monto: formatted.replaceAll(".", "").replace(",", "."),
+    moneda,
+    texto: formatted + " " + moneda,
+  };
+}

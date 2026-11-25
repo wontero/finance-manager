@@ -74,7 +74,7 @@ export async function loginBlocked(db: AuthDb, ip: string | null) {
   return Number(counts.ip_count) >= 5 || Number(counts.global_count) >= 20;
 }
 
-export function recordBlockedLogin(db: AuthDb, clientId: string) {
+export function recordBlockedLogin(db: AuthDb, clientId: string | null) {
   const context = authContext.getStore();
   const ip = context?.ip ?? null;
   // Different Passenger processes share this audit guard without locking auth_users.
@@ -100,6 +100,9 @@ export function recordBlockedLogin(db: AuthDb, clientId: string) {
 }
 
 export async function purgeAuth(db: AuthDb) {
+  await sql`DELETE FROM web_sessions WHERE expires_at <= UTC_TIMESTAMP(3)`.execute(
+    db,
+  );
   const live = sql`t.revoked_at IS NULL AND t.expires_at > UTC_TIMESTAMP(3)
     AND t.family_expires_at > UTC_TIMESTAMP(3)`;
   await sql`DELETE FROM oauth_authorization_codes
@@ -135,6 +138,9 @@ export function revokeFamily(db: AuthDb, family: Buffer) {
 }
 
 export async function revokeAll(db: AuthDb) {
+  await sql`UPDATE web_sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE revoked_at IS NULL`.execute(
+    db,
+  );
   await sql`UPDATE oauth_tokens SET revoked_at = UTC_TIMESTAMP(3)
     WHERE revoked_at IS NULL`.execute(db);
   await sql`DELETE FROM oauth_authorization_codes WHERE phase <> 'used'`.execute(

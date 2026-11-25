@@ -1,4 +1,4 @@
-import { parseAmount } from "@finance-manager/core";
+import { parseAmount, type TransactionType } from "@finance-manager/core";
 import { sql, type Kysely } from "kysely";
 import { currentPostings, descendants, naturalAmount } from "./queries.js";
 import type { LedgerDatabase } from "./schema.js";
@@ -169,46 +169,54 @@ export async function findTransactions(
     from?: string;
     to?: string;
     accountId?: string;
+    categoryId?: string;
+    type?: TransactionType;
     tag?: string;
     text?: string;
     min?: string;
     max?: string;
     includeDeleted?: boolean;
+    includeDayTotals?: boolean;
   },
 ) {
   if (input.from && input.to && input.from > input.to)
     throw new Error("El inicio del rango debe ser anterior o igual al final.");
+  const hasCategory = (kind: "income" | "expense") => sql`EXISTS (
+    SELECT 1 FROM postings p JOIN accounts a ON a.id = p.account_id
+    WHERE p.transaction_id = t.id AND a.kind = ${kind}
+  )`;
+  const type = sql<TransactionType>`CASE
+    WHEN ${hasCategory("expense")} THEN 'gasto'
+    WHEN ${hasCategory("income")} THEN 'ingreso'
+    WHEN (SELECT COUNT(DISTINCT p.account_id) FROM postings p JOIN accounts a ON a.id = p.account_id
+          WHERE p.transaction_id = t.id AND a.kind IN ('asset', 'liability')) >= 2 THEN 'transferencia'
+    ELSE 'ajuste' END`;
   let query = db
     .selectFrom("transactions as t")
+    .innerJoin("operations as o", "o.id", "t.operation_id")
     .select([
-      "id",
-      "date",
-      "description",
-      "note",
-      "custom",
-      "operation_id",
-      "deleted_at",
+      "t.id",
+      "t.date",
+      "t.description",
+      "t.note",
+      "t.custom",
+      "t.operation_id",
+      "t.deleted_at",
+      "o.actor",
+      type.as("type"),
     ])
-    .orderBy("date", "desc")
-    .orderBy("id", "desc")
+    .orderBy("t.date", "desc")
+    .orderBy("t.id", "desc")
     .limit(input.limit + 1);
   if (!input.includeDeleted) query = query.where("t.deleted_at", "is", null);
   if (input.id) query = query.where("t.id", "=", input.id);
   if (input.from) query = query.where("t.date", ">=", input.from);
   if (input.to) query = query.where("t.date", "<=", input.to);
-  if (input.before) {
-    const { date, id } = input.before;
-    query = query.where(({ and, or, eb }) =>
-      or([
-        eb("t.date", "<", date),
-        and([eb("t.date", "=", date), eb("t.id", "<", id)]),
-      ]),
-    );
-  }
   if (input.text)
     query = query.where(sql<boolean>`(
     LOCATE(${input.text}, t.description) > 0 OR LOCATE(${input.text}, t.note) > 0
   )`);
+  if (input.type) query = query.where(type, "=", input.type);
   if (input.tag) {
     query = query.where(({ exists, selectFrom }) =>
       exists(
@@ -217,6 +225,25 @@ export async function findTransactions(
           .select("tt.tag_id")
           .whereRef("tt.transaction_id", "=", "t.id")
           .where("g.name", "=", input.tag!),
+      ),
+    );
+  }
+  if (input.categoryId) {
+    const categories = await db
+      .selectFrom("accounts")
+      .select(["id", "parent_id"])
+      .where("kind", "in", ["income", "expense"])
+      .execute();
+    const ids = categories.some(({ id }) => id === input.categoryId)
+      ? descendants(categories, input.categoryId)
+      : [];
+    if (!ids.length) return { more: false, entries: [], dayTotals: [] };
+    query = query.where(({ exists, selectFrom }) =>
+      exists(
+        selectFrom("postings as p")
+          .select("p.id")
+          .whereRef("p.transaction_id", "=", "t.id")
+          .where("p.account_id", "in", ids),
       ),
     );
   }
@@ -268,9 +295,43 @@ export async function findTransactions(
       exists(matches.where("p.transaction_id", "=", sql<string>`t.id`)),
     );
   }
+  const filtered = query.clearSelect().clearOrderBy().clearLimit();
+  if (input.before) {
+    const { date, id } = input.before;
+    query = query.where(({ and, or, eb }) =>
+      or([
+        eb("t.date", "<", date),
+        and([eb("t.date", "=", date), eb("t.id", "<", id)]),
+      ]),
+    );
+  }
   const rows = await query.execute();
   const page = rows.slice(0, input.limit);
   const ids = page.map(({ id }) => id);
+  const dates = [...new Set(page.map(({ date }) => date))];
+  const dayTotals =
+    input.includeDayTotals && dates.length
+      ? await db
+          .selectFrom("postings as p")
+          .innerJoin("transactions as t", "t.id", "p.transaction_id")
+          .innerJoin("accounts as a", "a.id", "p.account_id")
+          .select([
+            "t.date",
+            "a.kind",
+            "p.currency",
+            sql<string>`SUM(p.amount)`.as("amount"),
+          ])
+          .where("a.kind", "in", ["income", "expense"])
+          .where("t.date", "in", dates)
+          .where(
+            "t.id",
+            "in",
+            filtered.select("t.id").where("t.date", "in", dates),
+          )
+          .groupBy(["t.date", "a.kind", "p.currency"])
+          .orderBy("p.currency")
+          .execute()
+      : [];
   const postings = ids.length
     ? await db
         .selectFrom("postings")
@@ -290,6 +351,7 @@ export async function findTransactions(
     : [];
   return {
     more: rows.length > page.length,
+    dayTotals,
     entries: page.map((row) => ({
       ...row,
       postings: postings.filter(

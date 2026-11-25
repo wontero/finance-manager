@@ -111,7 +111,19 @@ La [guía de despliegue](docs/operacion/despliegue.md) cubre cPanel, Passenger, 
 
 ## Hoja de ruta
 
-El incremento 2 incorpora el dashboard. Después están previstos presupuestos, movimientos recurrentes y objetivos financieros.
+Después del dashboard están previstos presupuestos, movimientos recurrentes y objetivos financieros.
+
+## Dashboard v1
+
+Abre la raíz del sitio e inicia sesión con la contraseña creada mediante `npm run auth:setup`. El dashboard usa solo contraseña por decisión de Mateo. Claude conserva el flujo OAuth con TOTP.
+
+- **Resumen** muestra patrimonio, efectivo y cuentas de subtipo banco, ingresos y gastos frente al mes anterior, principales categorías y los últimos movimientos del mes elegido. El disponible se conserva por moneda. Las categorías se ordenan por su valor conocido en Bs al cierre. Si falta una cotización para un saldo, el patrimonio se muestra como parcial.
+- **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
+- **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
+
+La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El bloqueo por intentos se comparte con OAuth y el inicio de sesión queda en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. Para revocar todas las sesiones web y credenciales OAuth activas, ejecuta `npm run auth:tokens -- revoke-all`.
+
+Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía `/api` al puerto de Express. Con Express sirviendo el build, usa el origen de Express.
 
 ## Licencia
 
@@ -119,4 +131,4 @@ Pendiente.
 
 ## English summary
 
-FinanceManager is a personal finance ledger controlled through Claude.ai over remote MCP and OAuth. It supports double-entry, multiple currencies, reversible operations, simple-interest loans, and encrypted backups. The dashboard is planned for increment 2.
+FinanceManager is a personal finance ledger controlled through Claude.ai over remote MCP and OAuth. It supports double-entry, multiple currencies, reversible operations, simple-interest loans, and encrypted backups. The web dashboard supports read-only views and operation reversal.

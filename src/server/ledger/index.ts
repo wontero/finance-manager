@@ -5,7 +5,7 @@ import {
   todayLaPaz,
   type LedgerInput,
 } from "@finance-manager/core";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import type { z } from "zod";
 import * as accounts from "./accounts.js";
 import { utcStamp, writeLedger, type LedgerWrite } from "./audit.js";
@@ -19,6 +19,7 @@ import {
   naturalAmount,
 } from "./queries.js";
 import type { Actor, LedgerDatabase } from "./schema.js";
+import * as dashboard from "./dashboard.js";
 import * as reports from "./reports.js";
 import * as entries from "./transactions.js";
 
@@ -36,7 +37,7 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       return writeLedger(db, writer, description, (write) => run(write, value));
     };
   const read = <Result>(
-    run: (trx: Kysely<LedgerDatabase>) => Promise<Result>,
+    run: (trx: Transaction<LedgerDatabase>) => Promise<Result>,
   ) => db.transaction().setIsolationLevel("repeatable read").execute(run);
 
   return {
@@ -256,6 +257,16 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         getOperations(trx, page?.limit ?? limit, page?.before),
       );
     },
+    dashboardAccounts: () => read(dashboard.dashboardAccounts),
+    dashboardSummary: (month: string) =>
+      read((trx) => dashboard.dashboardSummary(trx, month)),
+    dashboardReports: (from: string, to: string) =>
+      read((trx) => dashboard.dashboardReports(trx, from, to)),
+    dashboardTransactions: (
+      input: Parameters<typeof dashboard.dashboardTransactions>[1],
+    ) => read((trx) => dashboard.dashboardTransactions(trx, input)),
+    dashboardOperations: (limit: number, before?: string) =>
+      read((trx) => dashboard.dashboardOperations(trx, limit, before)),
     getAccountTree: (includeArchived: boolean) =>
       reports.getAccountTree(db, includeArchived),
     listAccountBalances: (ids: string[], date: string) =>

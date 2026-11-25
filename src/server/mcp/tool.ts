@@ -1,7 +1,8 @@
-import { formatAmount, rowId } from "@finance-manager/core";
+import { rowId } from "@finance-manager/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { UndoConflict } from "../ledger/audit.js";
 
 export type ToolServer = McpServer;
 type Mode = "read" | "write" | "destructive";
@@ -42,7 +43,7 @@ export function registerTool<
       } catch (error) {
         const message =
           error instanceof Error &&
-          error.constructor === Error &&
+          (error.constructor === Error || error instanceof UndoConflict) &&
           !("code" in error) &&
           !("sql" in error)
             ? error.message
@@ -59,21 +60,7 @@ export const money = z.object({
   texto: z.string(),
 });
 
-export function amount(
-  amount: bigint,
-  moneda: string,
-  scales: ReadonlyMap<string, number>,
-) {
-  const scale = scales.get(moneda);
-  if (scale === undefined)
-    throw new Error(`Falta la unidad mínima de ${moneda}.`);
-  const formatted = formatAmount(amount, moneda, scale);
-  return {
-    monto: formatted.replaceAll(".", "").replace(",", "."),
-    moneda,
-    texto: formatted + " " + moneda,
-  };
-}
+export { decimalMoney as amount } from "@finance-manager/core";
 
 export const pageInput = {
   limite: z.number().int().min(1).max(200).prefault(50),

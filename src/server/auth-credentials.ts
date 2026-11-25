@@ -83,21 +83,40 @@ export async function replaceUser(
   });
 }
 
+function hasPassword(user: AuthUser) {
+  return Boolean(
+    user.password_hash?.length === 64 &&
+    user.password_salt &&
+    user.scrypt_n &&
+    user.scrypt_r &&
+    user.scrypt_p,
+  );
+}
+
+export async function checkPassword(user: AuthUser, password: string) {
+  const configured = hasPassword(user);
+  const costs = configured
+    ? { N: user.scrypt_n!, r: user.scrypt_r!, p: user.scrypt_p! }
+    : params;
+  const hash = await passwordHash(
+    password,
+    configured ? user.password_salt! : Buffer.alloc(16),
+    costs,
+  );
+  const matches = timingSafeEqual(
+    hash,
+    configured ? user.password_hash! : Buffer.alloc(64),
+  );
+  return configured && matches;
+}
+
 export async function checkCredentials(
   user: AuthUser,
   key: Buffer | undefined,
   password: string,
   token: string,
 ) {
-  if (
-    !key ||
-    !user.totp_encrypted ||
-    !user.password_hash ||
-    !user.password_salt ||
-    !user.scrypt_n ||
-    !user.scrypt_r ||
-    !user.scrypt_p
-  )
+  if (!key || !user.totp_encrypted || !hasPassword(user))
     return { outcome: "error" } as const;
   let secret;
   try {
@@ -106,12 +125,7 @@ export async function checkCredentials(
     console.error("No se pudo descifrar TOTP. Comprueba TOTP_ENCRYPTION_KEY.");
     return { outcome: "error" } as const;
   }
-  const hash = await passwordHash(password, user.password_salt, {
-    N: user.scrypt_n,
-    r: user.scrypt_r,
-    p: user.scrypt_p,
-  });
-  const passwordMatches = timingSafeEqual(hash, user.password_hash);
+  const passwordMatches = await checkPassword(user, password);
   const timestamp = Date.now();
   const clockStep = Math.floor(timestamp / 30_000);
   const validFormat = /^[0-9]{6}$/.test(token);

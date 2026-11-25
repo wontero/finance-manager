@@ -84,6 +84,8 @@ export function utcStamp() {
   return new Date().toISOString().slice(0, 23).replace("T", " ");
 }
 
+export class UndoConflict extends Error {}
+
 export class LedgerWrite {
   operationId: string | null = null;
 
@@ -131,11 +133,13 @@ export class LedgerWrite {
     return this.operationId;
   }
 
-  private async row<T extends Table>(table: T, key: Key<T>) {
+  private async row<T extends Table>(table: T, key: Key<T>, lock = true) {
     const {
       rows: [row],
     } = await sql<Row<T>>`SELECT * FROM ${sql.table(table)}
-      WHERE ${where(table, key)} FOR UPDATE`.execute(this.db);
+      WHERE ${where(table, key)} ${lock ? sql`FOR UPDATE` : sql``}`.execute(
+      this.db,
+    );
     return row;
   }
 
@@ -342,7 +346,7 @@ export class LedgerWrite {
       .where("id", "=", id)
       .forUpdate()
       .executeTakeFirst();
-    if (!target) throw new Error(`No existe la operación ${id}.`);
+    if (!target) throw new UndoConflict(`No existe la operación ${id}.`);
     const reversalOf = (operationId: string) =>
       this.db
         .selectFrom("operations")
@@ -361,7 +365,7 @@ export class LedgerWrite {
         latest = next.id;
         undone = !undone;
       }
-      throw new Error(
+      throw new UndoConflict(
         undone
           ? `La operación ${id} ya fue deshecha por ${latest}.`
           : `La operación ${id} ya fue rehecha. Para revertirla, usa deshacer ${latest}.`,
@@ -374,22 +378,92 @@ export class LedgerWrite {
       .where("operation_id", "=", id)
       .orderBy("id", "desc")
       .execute();
+    const changes = await this.planUndo(id, target, log, true);
+    return this.applyUndo(changes, target.seq);
+  }
+
+  async canUndo(
+    entry: Selectable<LedgerDatabase["operations"]>,
+    log: Selectable<LedgerDatabase["audit_log"]>[],
+  ) {
+    try {
+      const changes = await this.planUndo(entry.id, entry, log, false);
+      const restored = new Map(
+        changes.map(({ table, rowId, before }) => [
+          table + "/" + rowId,
+          before,
+        ]),
+      );
+      for (const change of changes) {
+        for (const [child, column, parent] of foreignKeys) {
+          if (
+            change.table === parent &&
+            change.before === null &&
+            parent !== "tags"
+          ) {
+            const { rows } =
+              await sql<SqlValues>`SELECT * FROM ${sql.table(child)}
+              WHERE ${sql.ref(column)} = ${change.rowId}`.execute(this.db);
+            if (
+              rows.some((row) => {
+                const key =
+                  child + "/" + rowId(child, row as Key<typeof child>);
+                return (
+                  !restored.has(key) ||
+                  restored.get(key)?.[column] === change.rowId
+                );
+              })
+            )
+              return false;
+          }
+          const referenced = change.before?.[column];
+          if (change.table === child && typeof referenced === "string") {
+            const key = parent + "/" + referenced;
+            if (
+              restored.has(key)
+                ? !restored.get(key)
+                : !(await this.row(parent, { id: referenced }, false))
+            )
+              return false;
+          }
+        }
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof UndoConflict) return false;
+      throw error;
+    }
+  }
+
+  private async planUndo(
+    id: string,
+    target: Pick<
+      Selectable<LedgerDatabase["operations"]>,
+      "seq" | "undoes_operation_id"
+    >,
+    log: Selectable<LedgerDatabase["audit_log"]>[],
+    lock: boolean,
+  ) {
     if (!log.length && target.undoes_operation_id === null)
-      throw new Error(`La operación ${id} no tiene cambios en la bitácora.`);
+      throw new UndoConflict(
+        `La operación ${id} no tiene cambios en la bitácora.`,
+      );
     const conflicts: string[] = [];
     const changes: Reversal[] = [];
     for (const item of log) {
       if (!Object.hasOwn(primaryKeys, item.table_name))
-        throw new Error(`No se puede deshacer la tabla ${item.table_name}.`);
+        throw new UndoConflict(
+          `No se puede deshacer la tabla ${item.table_name}.`,
+        );
       const table = item.table_name as Table;
       const before = parseSnapshot(item.before);
       const after = parseSnapshot(item.after);
       const key = (after ?? before) as Key<Table>;
       if (!key || rowId(table, key) !== item.row_id)
-        throw new Error(
+        throw new UndoConflict(
           `La bitácora tiene una clave inválida en ${table}/${item.row_id}.`,
         );
-      const row = await this.row(table, key);
+      const row = await this.row(table, key, lock);
       const current = row ? snapshot(row) : null;
       const alreadyRestored = after === null && sameState(current, before);
       const later = await this.laterChange(
@@ -401,11 +475,14 @@ export class LedgerWrite {
         changes.push({ table, key, before, after, rowId: item.row_id });
     }
     if (conflicts.length)
-      throw new Error(
+      throw new UndoConflict(
         `No se puede deshacer ${id}. Filas modificadas y sus operaciones: ${conflicts.join(", ")}.`,
       );
     await this.checkRestoredParents(changes, target.seq);
+    return changes;
+  }
 
+  private async applyUndo(changes: Reversal[], seq: string) {
     const retainedTags: Row<"tags">[] = [];
     for (const change of changes) {
       const { table, key, before, after, rowId } = change;
@@ -430,21 +507,17 @@ export class LedgerWrite {
           code === "ER_ROW_IS_REFERENCED_2" ||
           code === "ER_NO_REFERENCED_ROW_2"
         ) {
-          const operation = await this.foreignKeyOperation(
-            change,
-            target.seq,
-            code,
-          );
+          const operation = await this.foreignKeyOperation(change, seq, code);
           const detail = operation
             ? `Operación posterior: ${operation}.`
             : "No consta una operación posterior en la bitácora.";
-          throw new Error(
+          throw new UndoConflict(
             `No se puede restaurar ${table}/${rowId}: hay un conflicto con una fila relacionada. ${detail}`,
             { cause: error },
           );
         }
         if (code === "ER_DUP_ENTRY")
-          throw new Error(
+          throw new UndoConflict(
             `No se puede restaurar ${table}/${rowId}: la clave ya está ocupada.`,
             { cause: error },
           );

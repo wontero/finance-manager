@@ -138,8 +138,8 @@ test("S12: a Unix socket replaces TCP and must be an absolute path", () => {
   ).toThrow(/DATABASE_SOCKET debe indicar una ruta absoluta/);
 });
 
-test("S6: serves the dashboard and assets without masking reserved routes", async () => {
-  const dist = await mkdtemp(join(tmpdir(), "finance-web-"));
+test("S6 / M-015 S7: serves dashboard routes and assets from a dot-directory worktree", async () => {
+  const dist = await mkdtemp(join(tmpdir(), ".finance-web-"));
   try {
     const index = "<html>Finance Manager</html>";
     await writeFile(join(dist, "index.html"), index);
@@ -148,6 +148,7 @@ test("S6: serves the dashboard and assets without masking reserved routes", asyn
 
     await web.get("/").expect(200, index);
     await web.get("/cualquier/ruta").expect(200, index);
+    await web.get("/actividad").expect(200, index);
     await web
       .get("/style.css")
       .expect(200)
