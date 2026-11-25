@@ -65,6 +65,16 @@ La API recibe importes de línea positivos en cadena decimal o boliviana. Se rec
 
 `transaction_tags` relaciona asientos y etiquetas. Los nombres se comparan con la colación de la tabla para compartir etiquetas como `Viaje` y `viaje`. `custom_field_definitions` define los campos almacenados como JSON en cuentas y asientos. Las altas y los cambios de `custom` validan todas las claves contra las definiciones activas. El lote de importación compara asientos vigentes de la misma fecha por las líneas `(cuenta, moneda, importe)`, sin importar su orden y conservando repeticiones.
 
+## Préstamos e interés simple
+
+`loans` relaciona cada préstamo con una cuenta raíz exclusiva y de moneda fija. Su capital inicial y capital pagado se guardan en unidades mínimas. Para un préstamo hecho, el alta debita `por_cobrar` y acredita caja. Para uno recibido, debita caja y acredita `prestamo_recibido`. Si la caja ya quedó registrada en el historial, el alta usa `Saldos iniciales` como contrapartida. Los abonos mueven caja, reducen el capital por la parte que corresponde y contabilizan el interés cobrado en Ingresos › Intereses o pagado en Gastos › Intereses.
+
+El interés de cada tramo es capital pendiente × tasa diaria × días naturales transcurridos. Para una tasa anual, la tasa diaria es porcentaje ÷ 100 ÷ 365. Para una tasa mensual es porcentaje ÷ 100 × 12 ÷ 365. Por ejemplo, 1.000,00 BOB al 2 % mensual durante 30 días devenga 19,726027… BOB, redondeados a 19,73 BOB. Un abono de 100,00 BOB cubre ese interés y deja 919,73 BOB de capital, la base del siguiente tramo.
+
+La tasa se almacena como `DECIMAL(9,6)` en porcentaje. El núcleo usa `bigint` con denominador común 36.500.000.000 para calcular fracciones de la unidad mínima. Al abonar o consultar, redondea el interés pendiente a la unidad mínima, con los empates alejándose de cero. El abono resta solo el interés efectivamente pagado del numerador exacto. Así conserva en `interest_carry` tanto el interés impago como las fracciones, incluido un resto negativo cuando se redondeó hacia arriba. En el ejemplo queda un resto de −0,003972… BOB que se compensa con el devengo posterior. El interés exigible tiene un mínimo de cero. El resto nunca forma parte del capital.
+
+Cada abono actualiza la fecha del último pago, los importes pagados, el resto y la marca de cierre dentro de la misma operación auditada que el asiento. Para reconstruir el saldo y el desglose a una fecha, el servicio consulta las fotos de esos estados asociadas con asientos vigentes hasta ese día. Deshacer el último abono restaura el estado anterior y retira el asiento. Para corregir un asiento del préstamo, se usa su operación de deshacer. Las escrituras contables generales rechazan nuevas líneas en la cuenta del préstamo. La vista `v_loans` expone los datos del préstamo y los acumulados registrados. Para obtener el interés devengado a una fecha, usa `consultar_prestamos`.
+
 ## Operaciones y deshacer
 
 Cada escritura del servicio usa una transacción que bloquea la raíz Ingresos para serializar las decisiones que abarcan varias filas. El módulo de escritura crea una sola fila en `operations` y una en `audit_log` por cada fila de dominio modificada. Las llamadas sin cambios, como conciliar un saldo igual, no crean una operación. La lista de operaciones se ordena por `seq` descendente. El correlativo puede tener saltos.

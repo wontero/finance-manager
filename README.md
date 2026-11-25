@@ -66,6 +66,12 @@ Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `
 - `npm run auth:tokens -- list` lista los identificadores de tokens activos. Usa `npm run auth:tokens -- revoke <id>` para revocar una familia o `npm run auth:tokens -- revoke-all` para desconectar todos los clientes.
 - `npm run auth:unlock` borra los intentos vigentes de inicio de sesión y conserva los tokens emitidos.
 
+## Préstamos en Claude
+
+- Alta con `registrar_prestamo`. «El 10 de noviembre le presté 500,00 BOB a Juan desde Efectivo al 2 % mensual». Para un préstamo sin interés, indica tasa 0 y el período. Si la salida o entrada de caja ya está registrada en el historial, indica `sin_movimiento_de_caja`.
+- Consulta con `consultar_prestamos`. «¿Cuánto me debe Juan al 10 de diciembre? Muéstrame el desglose y los abonos». También puedes listar por persona o estado y obtener totales separados por moneda.
+- Pago con `abonar_prestamo`. «Juan me devolvió 200,00 BOB por Efectivo el 10 de diciembre». El abono cubre primero el interés pendiente y después reduce el capital. Para corregirlo, usa `deshacer_operacion` con el ID devuelto. Si hay abonos posteriores de ese préstamo, deshaz primero los más recientes.
+
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
