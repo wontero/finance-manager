@@ -71,11 +71,12 @@ Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
 - `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso, los servicios contables, el flujo OAuth, las herramientas MCP y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
 - `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
+- `bash src/deploy/backup.test.sh` y `bash src/deploy/guide.test.sh` comprueban el flujo de copias y la guía de operación. En Windows, ejecuta la integración con `FINANCE_TEST_WSL_BACKUP=1` para incluir la restauración real con GPG y flock de WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
 
 ## Despliegue
 
-La guía cubre cPanel y Passenger, el rollback, el alta del usuario y la conexión de Claude en web y móvil mediante OAuth. [Guía de despliegue](docs/operacion/despliegue.md)
+La guía cubre cPanel y Passenger, el rollback, el alta del usuario, la conexión de Claude mediante OAuth y el ensayo de restauración desde Drive. [Guía de despliegue](docs/operacion/despliegue.md) · [Guía de recuperación](docs/operacion/recuperacion.md)
 
 ## Estructura del repositorio
 
@@ -83,7 +84,7 @@ La guía cubre cPanel y Passenger, el rollback, el alta del usuario y la conexi�
 - `src/server/` contiene la app HTTP, su punto de entrada y los scripts de MariaDB local.
 - `src/server/ledger/` contiene los servicios contables que escriben en MariaDB y registran la bitácora.
 - `src/server/mcp/` valida entradas y adapta los servicios contables a las herramientas en español.
-- `src/deploy/` contiene el script de despliegue y sus pruebas en Bash.
+- `src/deploy/` contiene los scripts de despliegue y copias cifradas y sus pruebas en Bash.
 - `src/web/` contiene la aplicación React y la configuración de shadcn/ui.
 - `src/scripts/` contiene la comprobación de versión de Node para las pruebas.
 - `docs/` contiene la documentación del proyecto.
