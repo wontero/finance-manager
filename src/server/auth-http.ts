@@ -1,6 +1,5 @@
 import { BlockList, isIPv6, type Socket } from "node:net";
 import express, { type ErrorRequestHandler, type Express } from "express";
-import { ipKeyGenerator } from "express-rate-limit";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import {
   createOAuthMetadata,
@@ -14,6 +13,7 @@ import {
   type AuthConfig,
 } from "./auth-provider.js";
 import { authorizationForms, authorizationHeaders } from "./auth-pages.js";
+import { authRateLimitIp } from "./auth-rate-limit.js";
 import { authContext, clientIp, type AuthDb } from "./auth-store.js";
 
 let passengerDiagnosed = false;
@@ -33,13 +33,6 @@ function isLocalPassengerSocket({
     return remoteFamily === undefined && localAddress === undefined;
   return loopback.check(remoteAddress, isIPv6(remoteAddress) ? "ipv6" : "ipv4");
 }
-
-const authRateLimitIp = {
-  keyGenerator: () => {
-    const ip = authContext.getStore()?.ip;
-    return ip ? ipKeyGenerator(ip) : "global";
-  },
-};
 
 const secretRateLimit = {
   ...authRateLimitIp,
@@ -113,7 +106,7 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
       authorizationHeaders(response, config);
       next();
     },
-    authorizationForms(config, authRateLimitIp, db),
+    authorizationForms(config, db),
   );
 
   app.post(

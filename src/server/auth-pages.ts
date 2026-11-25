@@ -1,12 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import express, { type Request, type Response } from "express";
-import {
-  rateLimit,
-  type Options as RateLimitOptions,
-} from "express-rate-limit";
 import { sql } from "kysely";
 import { checkCredentials } from "./auth-credentials.js";
 import type { AuthConfig } from "./auth-provider.js";
+import { loginRateLimit } from "./auth-rate-limit.js";
 import {
   authContext,
   authEvent,
@@ -195,27 +192,19 @@ async function getForm(
 
 export function authorizationForms(
   config: AuthConfig,
-  ipOptions: Pick<RateLimitOptions, "keyGenerator">,
   database: AuthDb | undefined,
 ) {
   const router = express.Router();
   for (const path of ["/login", "/consent"]) {
     router.post(
       path,
-      rateLimit({
-        ...ipOptions,
-        windowMs: 15 * 60_000,
-        limit: () => (authContext.getStore()?.ip ? 20 : 60),
-        standardHeaders: "draft-6",
-        legacyHeaders: false,
-        handler: (_request, response) => {
-          page(
-            response,
-            "Demasiadas solicitudes",
-            "<p>Vuelve a intentarlo más tarde.</p>",
-            429,
-          );
-        },
+      loginRateLimit((_request, response) => {
+        page(
+          response,
+          "Demasiadas solicitudes",
+          "<p>Vuelve a intentarlo más tarde.</p>",
+          429,
+        );
       }),
     );
   }

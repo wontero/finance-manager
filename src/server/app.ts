@@ -1,14 +1,20 @@
+import type { ServerResponse } from "node:http";
 import { extname } from "node:path";
 import { APP_NAME } from "@finance-manager/core";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { installAuth } from "./auth-http.js";
 import type { readConfig } from "./config.js";
-import { dashboardApi } from "./dashboard-http.js";
+import { dashboardApi, dashboardHeaders } from "./dashboard-http.js";
 import { checkDatabase, createDatabase } from "./database.js";
 import { createMcp } from "./mcp/index.js";
 
 type Config = ReturnType<typeof readConfig>;
+
+function setDashboardHeaders(response: ServerResponse) {
+  for (const [name, value] of Object.entries(dashboardHeaders))
+    if (!response.hasHeader(name)) response.setHeader(name, value);
+}
 
 export function createApp(
   { auth, database, readonlyDatabase, webDistDir, version }: Config,
@@ -63,11 +69,12 @@ export function createApp(
   });
 
   app.use("/api", dashboardApi(auth, connection?.db));
-  app.use(express.static(webDistDir));
+  app.use(express.static(webDistDir, { setHeaders: setDashboardHeaders }));
   app.get("/{*path}", (request, response, next) => {
     const segments = request.params.path;
     if (segments?.[0] === "assets" || extname(segments?.at(-1) ?? ""))
       return next();
+    setDashboardHeaders(response);
     response.sendFile("index.html", { root: webDistDir });
   });
 

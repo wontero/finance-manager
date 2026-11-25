@@ -9,11 +9,17 @@ import {
 import express, { type ErrorRequestHandler } from "express";
 import { z } from "zod";
 import type { AuthConfig } from "./auth-provider.js";
+import { loginRateLimit } from "./auth-rate-limit.js";
 import type { AuthDb } from "./auth-store.js";
 import { UndoConflict } from "./ledger/audit.js";
 import { shiftMonth } from "./ledger/dashboard.js";
 import { createLedger } from "./ledger/index.js";
 import { webSession } from "./web-session.js";
+
+export const dashboardHeaders = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+};
 
 const limit = z
   .string()
@@ -71,7 +77,7 @@ export function dashboardApi(config: AuthConfig, db?: AuthDb) {
   const authenticated: DashboardSession = { authenticated: true };
 
   router.use((request, response, next) => {
-    response.set("Cache-Control", "no-store");
+    response.set({ ...dashboardHeaders, "Cache-Control": "no-store" });
     if (
       request.method !== "GET" &&
       request.method !== "HEAD" &&
@@ -85,8 +91,15 @@ export function dashboardApi(config: AuthConfig, db?: AuthDb) {
     next();
   });
 
-  router.post("/session", express.json({ limit: "4kb" }), (request, response) =>
-    session.login(db, request, response),
+  router.post(
+    "/session",
+    loginRateLimit((_request, response) => {
+      response.status(429).json({
+        error: "Demasiadas solicitudes. Vuelve a intentarlo más tarde.",
+      });
+    }),
+    express.json({ limit: "4kb" }),
+    (request, response) => session.login(db, request, response),
   );
 
   router.use(async (request, response, next) => {

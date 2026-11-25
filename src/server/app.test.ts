@@ -162,6 +162,61 @@ test("S6 / M-015 S7: serves dashboard routes and assets from a dot-directory wor
   }
 });
 
+test("M-015B S3: dashboard login uses the HTTP limit and the trusted IP", async () => {
+  const origin = "https://finanzas.example";
+  const client = request(createApp(readConfig({ PUBLIC_URL: origin })));
+  const login = (ip: string) =>
+    client
+      .post("/api/session")
+      .set("Origin", origin)
+      .set("X-Forwarded-For", ip)
+      .send({ password: "prueba" });
+  for (let attempt = 1; attempt <= 20; attempt++)
+    await login(`192.0.2.${attempt}`).expect(401);
+  await login("192.0.2.21")
+    .expect(429)
+    .expect("RateLimit-Limit", "20")
+    .expect("RateLimit-Remaining", "0")
+    .expect("Retry-After", /^\d+$/)
+    .expect("Cache-Control", "no-store");
+});
+
+test("M-015B S4: the SPA and API prevent framing", async () => {
+  const dist = await mkdtemp(join(tmpdir(), ".finance-web-"));
+  try {
+    await writeFile(join(dist, "index.html"), "<html>Finance Manager</html>");
+    const client = request(createApp(readConfig({ WEB_DIST_DIR: dist })));
+    for (const response of [
+      await client.get("/").expect(200),
+      await client.get("/actividad").expect(200),
+      await client.get("/api/session").expect(401),
+      await client.post("/api/session").expect(403),
+    ]) {
+      expect(response.headers["content-security-policy"]).toBe(
+        "frame-ancestors 'none'",
+      );
+      expect(response.headers["x-frame-options"]).toBe("DENY");
+    }
+    for (const response of [
+      await client.get("/health").expect(200),
+      await client.post("/mcp").expect(401),
+      await client.get("/.well-known/oauth-authorization-server").expect(200),
+    ]) {
+      expect(response.headers["content-security-policy"]).toBeUndefined();
+      expect(response.headers["x-frame-options"]).toBeUndefined();
+    }
+    await client
+      .get("/authorize/login")
+      .expect(
+        "Content-Security-Policy",
+        /^default-src 'none';.*frame-ancestors 'none'$/,
+      )
+      .expect("X-Frame-Options", "DENY");
+  } finally {
+    await rm(dist, { recursive: true, force: true });
+  }
+});
+
 test.each([
   ["PORT", "abc", /PORT debe ser un entero/],
   [

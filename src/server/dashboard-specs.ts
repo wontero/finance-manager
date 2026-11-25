@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { decimalMoney, parseAmount } from "@finance-manager/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { sql } from "kysely";
 import { Secret } from "otpauth";
 import request from "supertest";
@@ -10,6 +12,7 @@ import { authTransaction, digest, purgeAuth, revokeAll } from "./auth-store.js";
 import { readConfig } from "./config.js";
 import { createDatabase } from "./database.js";
 import { createLedger } from "./ledger/index.js";
+import { createMcp } from "./mcp/index.js";
 import { localDatabase } from "./scripts/local-database.js";
 
 const origin = "https://finanzas.example";
@@ -437,6 +440,124 @@ export function dashboardSpecs(schema: string) {
         expect(response.text).not.toContain(password);
         expect(response.text).not.toContain(cookie.split("=")[1]);
       }
+    },
+  );
+
+  verify(
+    "M-015B S1: Actividad marca como no deshacible un ciclo de padres",
+    async ({ api, session, ledger }) => {
+      const cookie = await session();
+      const kind = {
+        kind: "asset",
+        currency: "BOB",
+        subtype: "efectivo",
+      } as const;
+      const parent = await ledger.createAccount({
+        ...kind,
+        name: "M-015B padre",
+      });
+      const child = await ledger.createAccount({
+        ...kind,
+        name: "M-015B hija",
+        parentId: parent.id,
+      });
+      const moved = await ledger.moveAccount({ id: child.id, parentId: null });
+      await ledger.moveAccount({ id: parent.id, parentId: child.id });
+
+      const activity = await api
+        .get("/api/operations?limit=2")
+        .set("Cookie", cookie)
+        .expect(200);
+      expect(activity.body.rows).toContainEqual(
+        expect.objectContaining({ id: moved.operationId, canUndo: false }),
+      );
+      const undo = await api
+        .post(`/api/operations/${moved.operationId}/undo`)
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .expect(409);
+      expect(undo.body.error).toContain("crearía un ciclo");
+    },
+  );
+
+  verify(
+    "M-015B S2: conflictos de saldo archivado y clave duplicada en web y MCP",
+    async ({ api, session, ledger, db }) => {
+      const cookie = await session();
+      const name = "M-015B caja archivada";
+      const date = "2081-01-01";
+      const kind = {
+        kind: "asset",
+        currency: "BOB",
+        subtype: "efectivo",
+      } as const;
+      const cash = await ledger.createAccount({
+        ...kind,
+        name,
+      });
+      const correction = await ledger.reconcile(cash.id, "45", date);
+      await ledger.reconcile(cash.id, "0", date);
+      const movement = await ledger.reconcile(cash.id, "15", date);
+      const deleted = await ledger.deleteTransaction({ id: movement!.id });
+      const archived = await ledger.archiveAccount({ id: cash.id });
+      const before = "M-015B nombre original";
+      const account = await ledger.createAccount({ ...kind, name: before });
+      const renamed = await ledger.renameAccount({
+        id: account.id,
+        name: "M-015B nombre nuevo",
+      });
+      await ledger.createAccount({ ...kind, name: before.toUpperCase() });
+      const balanceError = `La cuenta archivada "${name}" debe tener saldo cero. Desarchívala o deshaz primero el archivado.`;
+      const conflicts = [
+        [correction!.operationId!, balanceError],
+        [deleted.operationId, balanceError],
+        [
+          renamed.operationId!,
+          `No se puede restaurar accounts/${account.id}: la clave ya está ocupada.`,
+        ],
+      ] as const;
+
+      const mcp = createMcp("m015b-test", db, undefined);
+      const client = new Client({ name: "m015b-test", version: "1" });
+      const [fromClient, fromServer] = InMemoryTransport.createLinkedPair();
+      await mcp.connect(fromServer);
+      try {
+        await client.connect(fromClient);
+        for (const [operationId, error] of conflicts) {
+          expect(
+            await client.callTool({
+              name: "deshacer_operacion",
+              arguments: { operationId },
+            }),
+          ).toMatchObject({
+            isError: true,
+            content: [{ type: "text", text: error }],
+          });
+        }
+        for (const [operationId, error] of conflicts) {
+          await api
+            .post(`/api/operations/${operationId}/undo`)
+            .set("Origin", origin)
+            .set("Cookie", cookie)
+            .expect(409, { error });
+        }
+      } finally {
+        await client.close();
+        await mcp.close();
+      }
+
+      const activity = await api
+        .get("/api/operations?limit=12")
+        .set("Cookie", cookie)
+        .expect(200);
+      for (const [id] of conflicts) {
+        expect(activity.body.rows).toContainEqual(
+          expect.objectContaining({ id, canUndo: false, undone: false }),
+        );
+      }
+      expect(activity.body.rows).toContainEqual(
+        expect.objectContaining({ id: archived.operationId, canUndo: true }),
+      );
     },
   );
 }

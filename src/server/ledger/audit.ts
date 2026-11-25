@@ -7,7 +7,7 @@ import {
   type Selectable,
   type Transaction,
 } from "kysely";
-import { archivedAccountWithBalance } from "./queries.js";
+import { archivedAccountWithBalance, getAccountTotal } from "./queries.js";
 import { systemAccounts, type Actor, type LedgerDatabase } from "./schema.js";
 
 const primaryKeys = {
@@ -78,6 +78,28 @@ function parseSnapshot(value: string | null) {
 
 function errorCode(error: unknown) {
   return error instanceof Error && "code" in error ? error.code : undefined;
+}
+
+function uniqueKeys(table: Table, row: Snapshot | null): SqlValues[] {
+  if (!row) return [];
+  switch (table) {
+    case "accounts": {
+      const keys: SqlValues[] = [];
+      if (row.archived_at === null)
+        keys.push({ active_parent_id: row.parent_id ?? "0", name: row.name });
+      if (row.loan_interest != null)
+        keys.push({ loan_interest: row.loan_interest });
+      return keys;
+    }
+    case "tags":
+      return [{ name: row.name }];
+    case "custom_field_definitions":
+      return [{ entity: row.entity, key: row.key }];
+    case "loans":
+      return [{ account_id: row.account_id }];
+    default:
+      return [];
+  }
 }
 
 export function utcStamp() {
@@ -288,7 +310,7 @@ export class LedgerWrite {
         .where("o.seq", ">", seq)
         .orderBy("a.id", "desc")
         .executeTakeFirst();
-      throw new Error(
+      throw new UndoConflict(
         `No se puede restaurar accounts/${rowId}: crearía un ciclo con las cuentas ${[...seen].join(", ")}.${later ? ` Operación posterior: ${later.operation_id}.` : ""}`,
       );
     }
@@ -382,6 +404,117 @@ export class LedgerWrite {
     return this.applyUndo(changes, target.seq);
   }
 
+  private async hasDuplicateKey(
+    { table, rowId, before, after }: Reversal,
+    earlier: string[],
+  ) {
+    const current = uniqueKeys(table, after);
+    for (const key of uniqueKeys(table, before)) {
+      if (current.some((value) => isDeepStrictEqual(value, key))) continue;
+      // Las filas ya restauradas tienen las claves que convivían con esta en la bitácora.
+      const { rows } = await sql`SELECT id FROM ${sql.table(table)}
+        WHERE id NOT IN (${sql.join([rowId, ...earlier])})
+        AND ${sql.join(
+          Object.entries(key).map(
+            ([column, value]) => sql`${sql.ref(column)} = ${value}`,
+          ),
+          sql` AND `,
+        )}
+        LIMIT 1`.execute(this.db);
+      if (rows.length) return true;
+    }
+    return false;
+  }
+
+  private async restoresArchivedBalance(changes: Reversal[]) {
+    // Proyecta el saldo sobre la lectura de Actividad sin ejecutar la reversión.
+    const transactions = new Map<string, Snapshot | null>();
+    const accounts = new Map<string, Snapshot | null>();
+    const postings: Reversal[] = [];
+    const transactionIds = new Set<string>();
+    for (const change of changes) {
+      const { table, rowId, before, after } = change;
+      if (table === "accounts") accounts.set(rowId, before);
+      if (
+        table === "transactions" &&
+        before?.deleted_at !== after?.deleted_at
+      ) {
+        transactions.set(rowId, before);
+        transactionIds.add(rowId);
+      }
+      if (table === "postings") {
+        postings.push(change);
+        if (before) transactionIds.add(before.transaction_id as string);
+        if (after) transactionIds.add(after.transaction_id as string);
+      }
+    }
+
+    const deltas = new Map<string, bigint>();
+    if (transactionIds.size) {
+      const active = new Set(
+        (
+          await this.db
+            .selectFrom("transactions")
+            .select("id")
+            .where("id", "in", [...transactionIds])
+            .where("deleted_at", "is", null)
+            .execute()
+        ).map(({ id }) => id),
+      );
+      const restoredActive = (id: string) =>
+        transactions.has(id)
+          ? transactions.get(id)?.deleted_at === null
+          : active.has(id);
+      const add = (accountId: string, amount: bigint) => {
+        deltas.set(accountId, (deltas.get(accountId) ?? 0n) + amount);
+      };
+
+      const changedPostings = new Set(postings.map(({ rowId }) => rowId));
+      if (transactions.size) {
+        const members = await this.db
+          .selectFrom("postings")
+          .select(["id", "transaction_id", "account_id", "amount"])
+          .where("transaction_id", "in", [...transactions.keys()])
+          .execute();
+        for (const posting of members) {
+          if (changedPostings.has(posting.id)) continue;
+          if (active.has(posting.transaction_id))
+            add(posting.account_id, -BigInt(posting.amount));
+          if (restoredActive(posting.transaction_id))
+            add(posting.account_id, BigInt(posting.amount));
+        }
+      }
+      for (const { before, after } of postings) {
+        if (after && active.has(after.transaction_id as string))
+          add(after.account_id as string, -BigInt(after.amount!));
+        if (before && restoredActive(before.transaction_id as string))
+          add(before.account_id as string, BigInt(before.amount!));
+      }
+    }
+
+    const ids = new Set([...accounts.keys(), ...deltas.keys()]);
+    if (!ids.size) return false;
+    const current = await this.db
+      .selectFrom("accounts")
+      .select(["id", "kind", "archived_at"])
+      .where("id", "in", [...ids])
+      .execute();
+    const currentById = new Map(
+      current.map((account) => [account.id, account]),
+    );
+    for (const id of ids) {
+      const account = accounts.has(id) ? accounts.get(id) : currentById.get(id);
+      if (
+        account &&
+        account.archived_at != null &&
+        (account.kind === "asset" || account.kind === "liability") &&
+        (await getAccountTotal(this.db, id)) + (deltas.get(id) ?? 0n) !== 0n
+      )
+        return true;
+    }
+    return false;
+  }
+
   async canUndo(
     entry: Selectable<LedgerDatabase["operations"]>,
     log: Selectable<LedgerDatabase["audit_log"]>[],
@@ -394,7 +527,12 @@ export class LedgerWrite {
           before,
         ]),
       );
+      const earlier = new Map<Table, string[]>();
       for (const change of changes) {
+        const siblings = earlier.get(change.table) ?? [];
+        if (await this.hasDuplicateKey(change, siblings)) return false;
+        siblings.push(change.rowId);
+        earlier.set(change.table, siblings);
         for (const [child, column, parent] of foreignKeys) {
           if (
             change.table === parent &&
@@ -428,7 +566,7 @@ export class LedgerWrite {
           }
         }
       }
-      return true;
+      return !(await this.restoresArchivedBalance(changes));
     } catch (error) {
       if (error instanceof UndoConflict) return false;
       throw error;
@@ -535,6 +673,7 @@ export async function writeLedger<T>(
   run: (write: LedgerWrite) => Promise<T>,
   undoes: string | null = null,
 ) {
+  const Conflict = undoes === null ? Error : UndoConflict;
   try {
     return await db
       .transaction()
@@ -555,7 +694,7 @@ export async function writeLedger<T>(
         if (write.operationId !== null) {
           const account = await archivedAccountWithBalance(trx);
           if (account)
-            throw new Error(
+            throw new Conflict(
               `La cuenta archivada "${account.name}" debe tener saldo cero. Desarchívala o deshaz primero el archivado.`,
             );
         }
@@ -563,7 +702,7 @@ export async function writeLedger<T>(
       });
   } catch (error) {
     if (errorCode(error) === "ER_DUP_ENTRY")
-      throw new Error("Ya existe un registro con la misma clave o nombre.", {
+      throw new Conflict("Ya existe un registro con la misma clave o nombre.", {
         cause: error,
       });
     throw error;
