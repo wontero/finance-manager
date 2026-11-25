@@ -51,7 +51,7 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
 
 ## 4. Prepara la primera release
 
-Cuando `main` en GitHub contenga esta misión, ejecuta los siguientes comandos en la misma terminal. Si abriste otra, define de nuevo `app_dir`, `GIT_SSH_COMMAND` y `repo_url`.
+Cuando `main` en GitHub contenga esta misión, ejecuta los siguientes comandos desde una sesión persistente de `tmux` o `screen`, como se explica en el paso 7. Si abriste otra terminal, define de nuevo `app_dir`, `GIT_SSH_COMMAND` y `repo_url`.
 
 ```bash
 export DEPLOY_REPO_URL="$repo_url"
@@ -64,6 +64,8 @@ rm -f -- "$bootstrap"
 ```
 
 `--bootstrap` compila `main` y crea `current` solo durante la instalación inicial. Comprueba que el script indique que preparó la release antes de registrarla. La verificación HTTPS se hace en el siguiente paso, una vez que exista la ruta de Passenger.
+
+Si usas `nohup`, sigue el ejemplo del paso 7 con `bash "$bootstrap" --bootstrap` y borra el archivo temporal cuando el proceso haya terminado.
 
 ## 5. Registra la app y comprueba la salud
 
@@ -88,6 +90,10 @@ rm -f -- "$bootstrap"
 
    Espera HTTP 200, el nombre `Finance Manager`, `status: "ok"` y `db: "ok"`. `db: "unavailable"` indica que falló la prueba de conexión y `db: "not_configured"` indica que falta `DATABASE_URL`. Abre también `https://finanzasmateo.ingetech.biz/` para comprobar la web.
 
+4. Prueba primero `localhost:3306` como en el paso 2. Si `/health` devuelve `db: "unavailable"` y confirmaste el usuario y sus permisos, busca el socket Unix desde la cuenta de cPanel. Ejecuta `my_print_defaults client client-server client-mariadb | sed -n 's/^--socket=//p'` para mostrar solo la ruta configurada. Si el cliente puede conectarse, confirma la ruta real con `mysql --user=ingete7_USUARIO --password --execute "SHOW VARIABLES LIKE 'socket';"`. [Archivos de opciones de MariaDB](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/configuring-mariadb/configuring-mariadb-with-option-files)
+
+   Añade `DATABASE_SOCKET=/ruta/absoluta/mysql.sock` a `shared/.env`, usando la ruta que encontraste. `DATABASE_URL` sigue aportando el usuario, la contraseña y la base. Con el socket configurado, el servidor omite el host y el puerto. Ejecuta `touch "$app_dir/current/tmp/restart.txt"` para que Passenger relea la configuración y repite `/health`.
+
 cPanel busca `app.js` en la raíz de la aplicación y el cargador documentado de Passenger lo abre con `require()`. El archivo es CommonJS y carga el servidor ESM mediante `import()`. Así se evita depender del soporte de `require(ESM)` del cargador instalado. El script toca `tmp/restart.txt` al activar cada release. [Arranque de Node en cPanel](https://docs.cpanel.net/knowledge-base/web-services/how-to-install-a-node.js-application/), [Arquitectura del cargador Passenger](https://www.phusionpassenger.com/documentation/Design%20and%20Architecture.html), [Despliegues con enlaces de Passenger](https://www.phusionpassenger.com/docs/advanced_guides/deployment_and_scaling/apache/automating_app_updates/)
 
 ## 6. Prueba Claude en web y en el celular
@@ -109,14 +115,28 @@ curl -fsS https://finanzasmateo.ingetech.biz/mcp \
 
 ## 7. Despliega cambios y usa rollback
 
+Si están disponibles, abre `tmux new -s finanzas` o `screen -S finanzas` antes de ejecutar el despliegue. Así puedes recuperar la terminal si se corta SSH. Dentro de la sesión, ejecuta lo siguiente.
+
 ```bash
 app_dir="$HOME/apps/finanzasmateo"
 export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/finance_manager_deploy -o IdentitiesOnly=yes"
 bash "$app_dir/current/src/deploy/deploy.sh" main
-bash "$app_dir/current/src/deploy/deploy.sh" --rollback
 ```
 
-Ejecuta el segundo comando solo si necesitas volver a la release que estaba activa antes. También puedes pasar una rama, etiqueta o SHA que el remoto exponga. El script construye la release antes de mover `current`, comprueba que responde esa release y vuelve a la anterior si falla. Conserva hasta cinco releases, incluidas la activa y la anterior.
+Si ninguno está instalado, define `app_dir` y `GIT_SSH_COMMAND` como arriba, deja la clave lista para uso sin preguntas y ejecuta el despliegue con `nohup`.
+
+```bash
+session_log=$(mktemp "$app_dir/shared/deploy-ssh.XXXXXX.log")
+nohup bash "$app_dir/current/src/deploy/deploy.sh" main >"$session_log" 2>&1 </dev/null &
+printf 'PID %s · log %s\n' "$!" "$session_log"
+tail -f "$session_log"
+```
+
+También puedes pasar una rama, etiqueta o SHA que el remoto exponga. El script construye la release antes de mover `current`, comprueba que responde esa release y vuelve a la anterior si falla. En un despliegue normal y en un rollback exige HTTP 200 y la cabecera de la release esperada. Si `shared/.env` define `DATABASE_URL`, exige además `db: "ok"` en el JSON. Conserva hasta cinco releases, incluidas la activa y la anterior.
+
+Para volver a la release anterior, ejecuta `bash "$app_dir/current/src/deploy/deploy.sh" --rollback`. El script muestra el origen y el destino. Escribe `s` para confirmar o pulsa **Enter** para cancelar. Usa `--rollback --yes` si necesitas confirmar desde un proceso sin terminal. Cada rollback exitoso intercambia la release activa y `previous`. Dos seguidos vuelven al punto de partida.
+
+Si se corta SSH, vuelve a conectarte y recupera la sesión con `tmux attach -t finanzas` o `screen -r finanzas`. Con `nohup`, revisa el PID que anotaste con `ps -p PID` y lee el log indicado. Espera a que termine antes de reintentar. Si el proceso ya terminó, compara `readlink "$app_dir/current"` y `readlink "$app_dir/shared/previous"` con la cabecera y el JSON de `/health`. Si el corte ocurrió durante una migración, verifica su resultado y la copia en `shared/backups` antes de repetir el despliegue o restaurar la base.
 
 Puedes cambiar las rutas con `DEPLOY_ROOT`, `DEPLOY_RELEASES_DIR`, `DEPLOY_SHARED_DIR` y `DEPLOY_REPO_DIR`. Usa `DEPLOY_REPO_URL` si cambia el origen, `DEPLOY_NODE_BIN` si Node 22 está en otro directorio y `DEPLOY_HEALTH_URL` si cambia la URL de salud. Los reintentos usan `DEPLOY_HEALTH_ATTEMPTS` (10) y `DEPLOY_HEALTH_DELAY` (3 segundos).
 
@@ -131,4 +151,5 @@ Ensaya la copia y restauración en una base desechable y detén las escrituras d
 - **HTTPS o 404**. Comprueba DNS, AutoSSL, el dominio de Application Manager y la ruta literal de la app.
 - **500 o cabecera de release antigua**. Revisa `~/apps/finanzasmateo/shared/logs/` desde **File Manager**, o `~/apps/finanzasmateo/current/logs/` mientras haya una release activa. Comprueba la versión de Node seleccionada para Passenger y que `current` apunte a la release compilada. Para pedir otro reinicio, toca `current/tmp/restart.txt`. Los errores recientes de Apache aparecen en **Metrics → Errors**. [Logs de Application Manager](https://docs.cpanel.net/cpanel/software/application-manager/#log-files), [Errores de Apache en cPanel](https://docs.cpanel.net/cpanel/metrics/errors/)
 - **MariaDB no disponible**. Revisa los nombres completos, permisos de la base y codificación de la contraseña en `shared/.env`. Toca `current/tmp/restart.txt` después de guardar cambios.
+- **Descarga, copia, migración o restauración fallida**. Abre el archivo `shared/logs/deploy-<release>.log` que indica el error. El archivo tiene permisos 600 y contiene el diagnóstico con las credenciales de configuración filtradas.
 - **MCP falla**. Comprueba la URL completa y prueba `initialize` con el comando anterior. Si pasa en la terminal, revisa que el conector esté habilitado en el chat y que el celular use la misma cuenta y espacio de trabajo.

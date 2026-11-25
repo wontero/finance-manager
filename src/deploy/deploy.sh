@@ -16,20 +16,28 @@ health_attempts=${DEPLOY_HEALTH_ATTEMPTS:-10}
 health_delay=${DEPLOY_HEALTH_DELAY:-3}
 current="$root/current"
 previous="$shared/previous"
+lock="$root/.deploy.lock"
 staged=
 switching=0
 
-[[ $# -le 1 ]] || fail 'Uso: deploy.sh [ref | --bootstrap | --rollback]'
+usage='Uso: deploy.sh [ref | --bootstrap | --rollback [--yes]]'
+[[ $# -le 1 || ( $# -eq 2 && $1 == --rollback && $2 == --yes ) ]] || fail "$usage"
 mode=${1:-main}
 case "$mode" in
   --bootstrap|--rollback) ;;
-  -*) fail 'Uso: deploy.sh [ref | --bootstrap | --rollback]' ;;
+  -*) fail "$usage" ;;
 esac
 [[ $health_attempts =~ ^[1-9][0-9]*$ && $health_delay =~ ^(0|[1-9][0-9]*)$ ]] ||
   fail 'Configura DEPLOY_HEALTH_ATTEMPTS (>0) y DEPLOY_HEALTH_DELAY (>=0) como enteros.'
 
-mkdir -p -- "$root" "$releases" "$shared"
-exec 9>"$root/.deploy.lock"
+reject_active_bootstrap() {
+  [[ $mode != --bootstrap || ! -L $current || ! -d $current ]] ||
+    fail 'La aplicación ya tiene una release activa.'
+}
+
+[[ -e $lock ]] || reject_active_bootstrap
+mkdir -p -- "$root"
+exec 9<>"$lock"
 flock -n 9 || fail 'Ya hay un despliegue en curso.'
 
 release_path() {
@@ -47,6 +55,24 @@ fi
 if [[ -n $prior ]]; then
   release_path "$prior" || fail 'previous no apunta a una release válida.'
 fi
+reject_active_bootstrap
+
+if [[ $mode == --rollback ]]; then
+  [[ -n $active && -n $prior && $active != "$prior" ]] || fail 'No hay una release anterior para restaurar.'
+  echo "Rollback de ${active##*/} a ${prior##*/}."
+  if [[ ${2:-} != --yes ]]; then
+    [[ -t 0 ]] || fail 'Confirma el rollback en una terminal o pasa --yes.'
+    read -r -p '¿Confirmas el rollback? [s/N] ' answer && [[ $answer == [sS] ]] ||
+      fail 'Rollback cancelado.'
+  fi
+fi
+
+[[ -r $shared/.env ]] || fail 'Prepara shared/.env antes de desplegar.'
+require_db=$(node -e '
+  const { readFileSync } = require("node:fs");
+  const { parseEnv } = require("node:util");
+  console.log(Object.hasOwn(parseEnv(readFileSync(process.argv[1], "utf8")), "DATABASE_URL"));
+' "$shared/.env" 2>/dev/null) || fail 'No se pudo leer shared/.env con Node.js.'
 
 replace_link() {
   ln -sfnT -- "$1" "$2.next" && mv -Tf -- "$2.next" "$2"
@@ -82,10 +108,30 @@ cleanup() {
 trap cleanup EXIT
 
 check_health() {
-  local release=${1##*/} headers attempt
+  local release=${1##*/} attempt
   for ((attempt = 1; attempt <= health_attempts; attempt++)); do
-    if headers=$(curl --fail --silent --max-time 4 --dump-header - --output /dev/null --write-out '%{http_code}' "$health_url" | tr -d '\r') &&
-      [[ $headers == *$'\n200' ]] && grep -Fxiq "X-Finance-Release: $release" <<< "$headers"; then
+    if curl --fail --silent --max-time 4 --include --suppress-connect-headers "$health_url" |
+      node -e '
+        const [release, requireDb] = process.argv.slice(1);
+        let response = require("node:fs").readFileSync(0, "utf8");
+        const boundary = /\r?\n\r?\n/;
+        while (/^HTTP\/\S+ 1\d\d\b/.test(response)) {
+          const end = boundary.exec(response);
+          if (!end) process.exit(1);
+          response = response.slice(end.index + end[0].length);
+        }
+        const end = boundary.exec(response);
+        if (!end || !/^HTTP\/\S+ 200\b/.test(response)) process.exit(1);
+        const headers = response.slice(0, end.index).toLowerCase().split(/\r?\n/);
+        if (!headers.includes(`x-finance-release: ${release}`)) process.exit(1);
+        if (requireDb === "true") {
+          try {
+            if (JSON.parse(response.slice(end.index + end[0].length))?.db !== "ok") process.exit(1);
+          } catch {
+            process.exit(1);
+          }
+        }
+      ' "$release" "$require_db"; then
       return 0
     fi
     if (( attempt < health_attempts )); then sleep "$health_delay"; fi
@@ -94,7 +140,6 @@ check_health() {
 }
 
 if [[ $mode == --rollback ]]; then
-  [[ -n $active && -n $prior && $active != "$prior" ]] || fail 'No hay una release anterior para restaurar.'
   switching=1
   activate "$prior"
   check_health "$prior" || fail 'Falló la comprobación de salud del rollback.'
@@ -105,27 +150,92 @@ if [[ $mode == --rollback ]]; then
 fi
 
 if [[ $mode == --bootstrap ]]; then
-  [[ -z $active ]] || fail 'La aplicación ya tiene una release activa.'
   mode=main
   bootstrap=1
 else
   bootstrap=0
 fi
 
-[[ -r $shared/.env ]] || fail 'Prepara shared/.env antes de desplegar.'
-[[ -d $repo ]] || git init --quiet --bare "$repo"
-git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" 2>/dev/null ||
-  fail 'No se pudo descargar la ref. Revisa la URL, la ref y la deploy key.'
-
+mkdir -p -- "$releases" "$shared/logs"
 while :; do
-  release_dir="$releases/$(date -u +%Y%m%d-%H%M%S)"
-  if [[ ! -e $release_dir && ! -L $release_dir ]]; then break; fi
+  release=$(date -u +%Y%m%d-%H%M%S)
+  release_dir="$releases/$release"
+  log="$shared/logs/deploy-$release.log"
+  if [[ ! -e $release_dir && ! -L $release_dir && ! -e $log && ! -L $log ]]; then break; fi
   sleep 1
 done
+(umask 077; set -o noclobber; : > "$log")
+chmod 600 -- "$log"
+
+redact_errors() {
+  DEPLOY_DIAGNOSTIC_REMOTE="$repo_url" node -e '
+    const { execFileSync } = require("node:child_process");
+    const { readFileSync } = require("node:fs");
+    const { parseEnv } = require("node:util");
+    const [envFile, options] = process.argv.slice(1);
+    const secrets = new Set();
+    function addSecret(value) {
+      if (!value) return;
+      secrets.add(value);
+      secrets.add(JSON.stringify(value).slice(1, -1));
+      secrets.add(encodeURIComponent(value));
+    }
+    function addCredential(value) {
+      addSecret(value);
+      try { addSecret(decodeURIComponent(value)); } catch { /* Literal percent sign. */ }
+    }
+    function addUrl(value, git = false) {
+      let url;
+      try { url = new URL(value); } catch { return; }
+      addCredential(url.password);
+      if (git && /^https?:$/.test(url.protocol)) addCredential(url.username);
+    }
+    try {
+      let errors = readFileSync(0, "utf8");
+      if (!errors) process.exit(0);
+      const env = parseEnv(readFileSync(envFile, "utf8"));
+      for (const source of [process.env, env]) {
+        addUrl(source.DATABASE_URL);
+        for (const [name, value] of Object.entries(source)) {
+          if (/PASSWORD|PASSWD|MYSQL_PWD/i.test(name)) addSecret(value);
+        }
+      }
+      addUrl(process.env.DEPLOY_DIAGNOSTIC_REMOTE, true);
+      if (options) {
+        const defaults = execFileSync("my_print_defaults", [
+          `--defaults-file=${options}`, "mysqldump", "mariadb-dump", "mysql",
+          "mariadb-client", "mariadb", "client", "client-server", "client-mariadb",
+        ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        for (const line of defaults.split(/\r?\n/)) {
+          if (line && !line.startsWith("--")) throw new Error();
+          if (/^--password[1-3]?=/.test(line)) addSecret(line.slice(line.indexOf("=") + 1));
+        }
+      }
+      for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+        errors = errors.replaceAll(secret, "[redactado]");
+      }
+      process.stdout.write(errors);
+    } catch {
+      console.log("Diagnóstico omitido: no se pudieron filtrar las credenciales.");
+    }
+  ' "$shared/.env" "${options:-}"
+}
+
+run_logged() {
+  local -a result
+  "$@" 2>&1 1>&3 | redact_errors >> "$log"
+  result=("${PIPESTATUS[@]}")
+  if (( result[1] != 0 )); then echo "No se pudo guardar el diagnóstico en $log." >&2; fi
+  return "${result[0]}"
+} 3>&1
+
+[[ -d $repo ]] || git init --quiet --bare "$repo"
+run_logged git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" ||
+  fail "No se pudo descargar la ref. Revisa la URL, la ref y la deploy key. Log: $log"
+
 mkdir -- "$release_dir"
 staged=$release_dir
 git -C "$repo" archive FETCH_HEAD | tar -x -C "$staged"
-mkdir -p -- "$shared/logs"
 ln -s -- "$shared/logs" "$staged/logs"
 (
   cd -- "$staged"
@@ -141,14 +251,14 @@ ln -s -- "$shared/logs" "$staged/logs"
       fail 'Configura DEPLOY_DB_NAME y el archivo de opciones de MariaDB antes de migrar.'
     install -d -m 700 -- "$shared/backups"
     backup=$(mktemp "$shared/backups/${staged##*/}.XXXXXX.sql")
-    if ! mysqldump --defaults-file="$options" --single-transaction --add-drop-database --databases "$database" > "$backup" 2>/dev/null; then
+    if ! run_logged mysqldump --defaults-file="$options" --single-transaction --add-drop-database --databases "$database" > "$backup"; then
       rm -f -- "$backup"
-      fail 'Falló la copia de MariaDB. No se ejecutó la migración.'
+      fail "Falló la copia de MariaDB. No se ejecutó la migración. Log: $log"
     fi
-    if ! npm run migrate >/dev/null 2>&1; then
-      mysql --defaults-file="$options" < "$backup" >/dev/null 2>&1 ||
-        fail "Fallaron la migración y la restauración. Conserva la copia $backup para recuperar la BD."
-      fail 'Falló la migración. Se restauró la copia de MariaDB y current no cambió.'
+    if ! run_logged npm run migrate >/dev/null; then
+      run_logged mysql --defaults-file="$options" < "$backup" >/dev/null ||
+        fail "Fallaron la migración y la restauración. Conserva la copia $backup para recuperar la BD. Log: $log"
+      fail "Falló la migración. Se restauró la copia de MariaDB y current no cambió. Log: $log"
     fi
   fi
 )
