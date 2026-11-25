@@ -38,6 +38,7 @@ Conversación ficticia; los importes y personas son de ejemplo:
 - Gastos, ingresos, transferencias multimoneda, carga por lotes, conciliación y valuación patrimonial.
 - Préstamos hechos y recibidos con interés simple y abonos aplicados primero a intereses.
 - Herramientas MCP para registrar, consultar y deshacer operaciones; consulta SQL limitada a vistas financieras de solo lectura.
+- `actualizar_tipo_de_cambio_oficial` consulta el tipo oficial USD/BOB vigente a través de CUCU, un tercero sin afiliación al BCB, y lo registra si la fecha aún no tiene una cotización. Para fechas pasadas o si falla la consulta, usa `registrar_tipo_de_cambio` con la fuente y el enlace.
 - Autenticación OAuth 2.1 con contraseña y TOTP.
 - Copias cifradas y guías de despliegue y recuperación.
 

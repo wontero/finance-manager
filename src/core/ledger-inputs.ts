@@ -111,7 +111,11 @@ export const ledgerInputs = {
     actualBalance: amount,
     date: accountingDate.optional(),
   }),
-  recordExchangeRate: pair.extend({ rate: z.string().max(25), source: name }),
+  recordExchangeRate: pair.extend({
+    rate: z.string().max(25),
+    source: name,
+    ifAbsent: z.literal(true).optional(),
+  }),
   getExchangeRate: pair,
   defineCustomField: z.discriminatedUnion("type", [
     field.extend({ type: z.enum(["text", "number", "date"]) }),

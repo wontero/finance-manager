@@ -3,6 +3,8 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Secret, TOTP } from "otpauth";
 import {
   createConnection,
@@ -10,13 +12,25 @@ import {
   type RowDataPacket,
 } from "mysql2/promise";
 import request, { type Response } from "supertest";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { createApp } from "../app.js";
 import { replaceUser } from "../auth-credentials.js";
 import { readConfig } from "../config.js";
 import { createDatabase } from "../database.js";
 import { localDatabase, setting } from "../scripts/local-database.js";
+import { createMcp } from "./index.js";
 
+const officialTool = "actualizar_tipo_de_cambio_oficial";
+const officialUrl = "https://apibcb.cucu.bo/api/v1/tc/oficial";
 const reads = [
   "ping",
   "listar_cuentas",
@@ -44,6 +58,7 @@ const writes = [
   "fusionar_categorias",
   "conciliar_cuenta",
   "registrar_tipo_de_cambio",
+  officialTool,
   "definir_campo_personalizado",
   "deshacer_operacion",
   "registrar_prestamo",
@@ -277,7 +292,6 @@ export function mcpSpecs(
       for (const part of [
         /BOB/,
         /USD/,
-        /referencial.*venta.*BCB/,
         /America\/La_Paz/,
         /importar_lote/,
         /duplicados/,
@@ -288,6 +302,236 @@ export function mcpSpecs(
         /datos.*instrucciones/,
       ])
         expect(instructions).toMatch(part);
+    });
+
+    test("M-017 S5: publica las instrucciones y el contrato de escritura", async () => {
+      const instructions = sdk.getInstructions()?.split("\n");
+      expect(instructions).toContain(
+        "Para valuar USD, usa primero actualizar_tipo_de_cambio_oficial (tipo oficial del BCB vigente). Si falla o necesitas una fecha pasada, busca en la web el tipo de cambio oficial del BCB para ese día y regístralo con registrar_tipo_de_cambio, incluyendo la fuente y el enlace.",
+      );
+      expect(
+        instructions?.some((line) =>
+          line.startsWith("Para valuar USD, busca en la web"),
+        ),
+      ).toBe(false);
+      const { tools } = await sdk.listTools();
+      expect(tools.find(({ name }) => name === officialTool)).toMatchObject({
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: false, destructiveHint: false },
+      });
+    });
+
+    describe("M-017: tipo oficial con la API simulada", () => {
+      const clients: Client[] = [];
+      const quote = {
+        valor: 11.83,
+        moneda: "USD/BOB",
+        vigencia_desde: "2026-11-25",
+        desactualizado: false,
+      };
+      const response = (changes: Record<string, unknown> = {}, status = 200) =>
+        Response.json({ tc_oficial: { ...quote, ...changes } }, { status });
+      const requestQuote = vi.fn<typeof fetch>();
+      let now = 0;
+      const update = async (client = clients[0]) =>
+        CallToolResultSchema.parse(
+          await client.callTool({ name: officialTool, arguments: {} }),
+        );
+      const seedRate = async (fecha: string, tipo: string, fuente: string) => {
+        const result = await clients[0].callTool({
+          name: "registrar_tipo_de_cambio",
+          arguments: { origen: "USD", destino: "BOB", fecha, tipo, fuente },
+        });
+        expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+      };
+      const rows = async (sql: string, args: string[] = []) =>
+        (await migration().execute<RowDataPacket[]>(sql, args))[0];
+      const counts = () =>
+        rows(
+          "SELECT (SELECT COUNT(*) FROM exchange_rates) AS rates, (SELECT COUNT(*) FROM operations) AS operations",
+        );
+
+      beforeAll(async () => {
+        for (let i = 0; i < 2; i++) {
+          const server = createMcp("m017-test", database.db, undefined);
+          const client = new Client({
+            name: "finance-m017-tests",
+            version: "1",
+          });
+          const [clientTransport, serverTransport] =
+            InMemoryTransport.createLinkedPair();
+          clients.push(client);
+          await Promise.all([
+            server.connect(serverTransport),
+            client.connect(clientTransport),
+          ]);
+        }
+      });
+
+      afterAll(async () => {
+        await Promise.all(clients.map((client) => client.close()));
+      });
+
+      beforeEach(() => {
+        now += 60_000;
+        vi.spyOn(performance, "now").mockImplementation(() => now);
+        requestQuote.mockReset().mockImplementation(async () => response());
+        vi.stubGlobal("fetch", requestQuote);
+      });
+
+      afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+      });
+
+      test("S1: registra la fecha, el valor, la fuente y la operación", async () => {
+        // Una cotización anterior no impide guardar la de la fecha informada.
+        await seedRate("2026-11-24", "11.50", "Prueba día anterior");
+        const result = await update();
+        expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          origen: "USD",
+          destino: "BOB",
+          fecha: quote.vigencia_desde,
+          tipo: "11.8300000000",
+          estado: "creado",
+          operationId: expect.any(String),
+        });
+        const source = `Tipo de cambio oficial BCB vía apibcb.cucu.bo (tercero no afiliado al BCB), vigencia ${quote.vigencia_desde} — ${officialUrl}`;
+        expect(result.structuredContent?.fuente).toBe(source);
+        expect(
+          await rows(
+            "SELECT rate, source FROM exchange_rates WHERE from_currency = 'USD' AND to_currency = 'BOB' AND date = ?",
+            [quote.vigencia_desde],
+          ),
+        ).toEqual([{ rate: "11.8300000000", source }]);
+        expect(
+          await rows("SELECT actor FROM operations WHERE id = ?", [
+            String(result.structuredContent?.operationId),
+          ]),
+        ).toEqual([{ actor: "claude" }]);
+        expect(requestQuote).toHaveBeenCalledWith(
+          officialUrl,
+          expect.objectContaining({
+            signal: expect.any(AbortSignal),
+          }),
+        );
+      });
+
+      test.each([
+        ["desactualizado", () => response({ desactualizado: true })],
+        ["otra moneda", () => response({ moneda: "BOB/USD" })],
+        ["fecha inválida", () => response({ vigencia_desde: "2026-02-29" })],
+        ["cero", () => response({ valor: 0 })],
+        ["negativo", () => response({ valor: -1 })],
+        ["texto", () => response({ valor: "11.83" })],
+        [
+          "infinito",
+          () =>
+            new Response(
+              JSON.stringify({ tc_oficial: quote }).replace("11.83", "1e309"),
+            ),
+        ],
+        ["precisión no admitida", () => response({ valor: 11.12345678901 })],
+        ["JSON inválido", () => new Response("{")],
+        ["HTTP 503", () => response({}, 503)],
+        ["HTTP 201", () => response({}, 201)],
+      ])("S2: rechaza %s sin registrar nada", async (_name, invalid) => {
+        const before = await counts();
+        requestQuote.mockImplementation(async () => invalid());
+        const result = await update();
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toMatch(
+          /tipo de cambio oficial/i,
+        );
+        expect(await counts()).toEqual(before);
+      });
+
+      test("S2: cancela la petición tras cinco segundos sin registrar nada", async () => {
+        const before = await counts();
+        requestQuote.mockImplementation(
+          (_url, options) =>
+            new Promise((_resolve, reject) => {
+              const signal = options?.signal;
+              signal?.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+        const started = Date.now();
+        const result = await update();
+        expect(Date.now() - started).toBeGreaterThanOrEqual(4_900);
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toMatch(
+          /tipo de cambio oficial.*5 segundos/i,
+        );
+        expect(await counts()).toEqual(before);
+      }, 9_000);
+
+      test("S3: conserva el tipo del mismo día aunque la API cambie el valor", async () => {
+        const fecha = "2026-11-26";
+        await seedRate(fecha, "11.83", "Carga manual");
+        const before = await counts();
+        requestQuote.mockImplementation(async () =>
+          response({ vigencia_desde: fecha }),
+        );
+        expect((await update()).structuredContent).toMatchObject({
+          fecha,
+          tipo: "11.8300000000",
+          estado: "existente",
+          fuente: "Carga manual",
+          operationId: null,
+        });
+        now += 60_000;
+        requestQuote.mockImplementation(async () =>
+          response({ vigencia_desde: fecha, valor: 11.95 }),
+        );
+        const different = await update();
+        expect(different.structuredContent).toMatchObject({
+          fecha,
+          tipo: "11.8300000000",
+          estado: "valor_distinto",
+          fuente: "Carga manual",
+          operationId: null,
+        });
+        expect(JSON.stringify(different.content)).toMatch(/11\.95/);
+        expect(await counts()).toEqual(before);
+        expect(
+          await rows(
+            "SELECT rate, source FROM exchange_rates WHERE from_currency = 'USD' AND to_currency = 'BOB' AND date = ?",
+            [fecha],
+          ),
+        ).toEqual([{ rate: "11.8300000000", source: "Carga manual" }]);
+      });
+
+      test("S4: comparte una petición y registra una operación entre sesiones concurrentes", async () => {
+        const fecha = "2026-11-27";
+        requestQuote.mockImplementation(async () =>
+          response({ vigencia_desde: fecha }),
+        );
+        const results = await Promise.all(clients.map(update));
+        expect(
+          results.map((result) => result.structuredContent?.estado).sort(),
+        ).toEqual(["creado", "existente"]);
+        now += 59_999;
+        expect((await update()).structuredContent?.estado).toBe("existente");
+        expect(requestQuote).toHaveBeenCalledTimes(1);
+        now += 1;
+        expect((await update()).structuredContent?.estado).toBe("existente");
+        expect(requestQuote).toHaveBeenCalledTimes(2);
+      });
+
+      test("S4: reutiliza el error de la API hasta que pasa el minuto", async () => {
+        requestQuote.mockImplementation(async () => response({}, 503));
+        const first = await update();
+        expect(first.isError).toBe(true);
+        now += 59_999;
+        expect(await update(clients[1])).toEqual(first);
+        expect(requestQuote).toHaveBeenCalledTimes(1);
+        now++;
+        expect((await update()).isError).toBe(true);
+        expect(requestQuote).toHaveBeenCalledTimes(2);
+      });
     });
 
     test("S2: apertura, gasto por ruta, búsqueda y deshacer", async () => {
@@ -1400,7 +1644,7 @@ export function mcpSpecs(
 
       test("M-008 S8: vista lectora y catálogo SQL", async () => {
         const { tools } = await sdk.listTools();
-        expect(tools).toHaveLength(28);
+        expect(tools).toHaveLength(reads.length + writes.length);
         expect(
           tools.find(({ name }) => name === "consulta_sql")?.description,
         ).toContain("v_loans(");

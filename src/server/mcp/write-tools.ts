@@ -1,11 +1,13 @@
 import {
   ledgerInputs,
+  parseRate,
   rowId,
   todayLaPaz,
   transactionInput,
 } from "@finance-manager/core";
 import { z } from "zod";
 import { accountLookup, accountRef, type Ledger } from "./accounts.js";
+import { getOfficialRate } from "./official-rate.js";
 import { registerTool, type ToolServer } from "./tool.js";
 
 const input = ledgerInputs;
@@ -453,6 +455,41 @@ export function registerWrites(server: ToolServer, ledger: Ledger) {
       return done(
         { ...showRate(result.rate), operationId: result.operationId },
         "Tipo de cambio registrado.",
+      );
+    },
+  );
+  registerTool(
+    server,
+    "actualizar_tipo_de_cambio_oficial",
+    "Consulta el tipo oficial del BCB vigente vía CUCU y lo registra si la fecha aún no tiene uno.",
+    z.strictObject({}),
+    operation.extend({
+      ...rateOutput.shape,
+      estado: z.enum(["creado", "existente", "valor_distinto"]),
+    }),
+    "write",
+    async () => {
+      const quote = await getOfficialRate();
+      const { rate, operationId } = await ledger.recordExchangeRate({
+        ...quote,
+        from: "USD",
+        to: "BOB",
+        ifAbsent: true,
+      });
+      const data = { ...showRate(rate), operationId };
+      if (operationId)
+        return done(
+          { ...data, estado: "creado" as const },
+          "Tipo de cambio oficial registrado.",
+        );
+      if (parseRate(rate.rate) === parseRate(quote.rate))
+        return done(
+          { ...data, estado: "existente" as const },
+          "El tipo de cambio ya estaba registrado.",
+        );
+      return done(
+        { ...data, estado: "valor_distinto" as const },
+        `El tipo de cambio registrado (${rate.rate}) difiere del publicado por CUCU (${quote.rate}). Se conservó el valor registrado.`,
       );
     },
   );

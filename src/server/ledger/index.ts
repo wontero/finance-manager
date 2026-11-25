@@ -18,7 +18,7 @@ import {
   getOperations,
   naturalAmount,
 } from "./queries.js";
-import type { Actor, LedgerDatabase } from "./schema.js";
+import type { Actor, ExchangeRate, LedgerDatabase } from "./schema.js";
 import * as dashboard from "./dashboard.js";
 import * as reports from "./reports.js";
 import * as entries from "./transactions.js";
@@ -39,6 +39,28 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
   const read = <Result>(
     run: (trx: Transaction<LedgerDatabase>) => Promise<Result>,
   ) => db.transaction().setIsolationLevel("repeatable read").execute(run);
+  const saveRate = mutate(
+    ledgerInputs.recordExchangeRate,
+    "Registrar tipo de cambio",
+    (write, { from, to, date, source, rate, ifAbsent }) =>
+      saveExchangeRate(
+        write,
+        from,
+        to,
+        date ?? todayLaPaz(),
+        source,
+        rate,
+        ifAbsent,
+      ),
+  );
+  type RateInput = LedgerInput<"recordExchangeRate">;
+  function recordExchangeRate(
+    input: RateInput & { ifAbsent?: undefined },
+  ): Promise<{ rate: ExchangeRate; operationId: string }>;
+  function recordExchangeRate(input: RateInput): ReturnType<typeof saveRate>;
+  function recordExchangeRate(input: RateInput) {
+    return saveRate(input);
+  }
 
   return {
     createAccount: mutate(
@@ -131,12 +153,7 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         accounts.reconcile(write, input),
       );
     },
-    recordExchangeRate: mutate(
-      ledgerInputs.recordExchangeRate,
-      "Registrar tipo de cambio",
-      (write, { from, to, date, source, rate }) =>
-        saveExchangeRate(write, from, to, date ?? todayLaPaz(), source, rate),
-    ),
+    recordExchangeRate,
     defineCustomField: mutate(
       ledgerInputs.defineCustomField,
       "Definir campo personalizado",

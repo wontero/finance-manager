@@ -7,6 +7,7 @@ All notable changes to FinanceManager are documented here. The format follows [K
 ### Añadido
 
 - Dashboard web con inicio de sesión, resumen, movimientos con filtros, informes y deshacer desde la actividad.
+- Herramienta MCP `actualizar_tipo_de_cambio_oficial` para registrar el tipo oficial USD/BOB vigente vía CUCU, un tercero sin afiliación al BCB, y conservar las cotizaciones ya registradas para esa fecha.
 
 ### Cambiado
 

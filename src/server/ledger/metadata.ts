@@ -100,8 +100,13 @@ export async function saveExchangeRate(
   date: string,
   source: string,
   rate: string,
+  ifAbsent?: true,
 ) {
   parseRate(rate);
+  if (ifAbsent) {
+    const existing = await findExchangeRate(write.db, from, to, date);
+    if (existing?.date === date) return { rate: existing, operationId: null };
+  }
   if (from === to)
     throw new Error("El tipo de cambio requiere dos monedas distintas.");
   const currencies = await write.db
