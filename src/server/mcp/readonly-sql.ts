@@ -1,3 +1,4 @@
+import type { Duplex } from "node:stream";
 import type { FieldPacket, Pool, PoolConnection } from "mysql2";
 import { z } from "zod";
 import { readonlyViewDescription } from "../readonly-views.js";
@@ -63,6 +64,8 @@ async function select(
       timeout: 7500,
     });
     const stream = query.stream({ highWaterMark: 1 });
+    // mysql2 quita su listener al cerrar el stream, pero el temporizador aún puede emitir.
+    query.on("error", (error: Error) => stream.destroy(error));
     let columns: string[] = [];
     stream.on("fields", (fields: FieldPacket[]) => {
       columns = fields.map(({ name }) => name);
@@ -95,8 +98,9 @@ async function select(
     if (!aviso) await conn.promise().rollback();
     return { filas, recortado: aviso !== null, aviso };
   } finally {
-    // El cierre revierte una consulta recortada y descarta el estado de sesión.
+    // destroy() retira la conexión del pool, pero mysql2 solo hace end() al socket.
     conn.destroy();
+    (conn as PoolConnection & { stream: Duplex }).stream.destroy();
   }
 }
 

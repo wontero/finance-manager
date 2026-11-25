@@ -231,7 +231,7 @@ export function registerWrites(server: ToolServer, ledger: Ledger) {
     "Corrige un movimiento por ID. Si envías líneas, reemplaza todas las anteriores.",
     draft.partial().extend({ id: rowId }),
     operationWithId,
-    "write",
+    "destructive",
     async (value) =>
       done(
         await ledger.editTransaction({

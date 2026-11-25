@@ -140,7 +140,8 @@ export async function moveAccount(
 
 export async function archiveAccount(write: LedgerWrite, id: string) {
   const account = await mutableAccount(write, id);
-  if (account.kind === "asset" || account.kind === "liability") {
+  const hasBalance = account.kind === "asset" || account.kind === "liability";
+  if (hasBalance) {
     const balance = naturalAmount(
       account.kind,
       await getAccountTotal(write.db, id),
@@ -152,15 +153,19 @@ export async function archiveAccount(write: LedgerWrite, id: string) {
         `La cuenta "${account.name}" tiene saldo ${formatAmount(balance, currency, scale)} ${currency}. Concíliala o transfiere el saldo antes de archivarla.`,
       );
     }
-  } else {
-    const child = await write.db
-      .selectFrom("accounts")
-      .select("id")
-      .where("parent_id", "=", id)
-      .where("archived_at", "is", null)
-      .executeTakeFirst();
-    if (child) throw new Error("La categoría tiene hijas activas.");
   }
+  const child = await write.db
+    .selectFrom("accounts")
+    .select("id")
+    .where("parent_id", "=", id)
+    .where("archived_at", "is", null)
+    .executeTakeFirst();
+  if (child)
+    throw new Error(
+      hasBalance
+        ? "La cuenta tiene hijas activas."
+        : "La categoría tiene hijas activas.",
+    );
   await write.update("accounts", { id }, { archived_at: utcStamp() });
   return { id, operationId: await write.operation() };
 }

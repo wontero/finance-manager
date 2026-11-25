@@ -1,9 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Secret, TOTP } from "otpauth";
-import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import {
+  createConnection,
+  type PoolConnection,
+  type RowDataPacket,
+} from "mysql2/promise";
 import request, { type Response } from "supertest";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createApp } from "../app.js";
@@ -42,6 +47,7 @@ const writes = [
   "deshacer_operacion",
 ];
 const destructive = [
+  "editar_movimiento",
   "borrar_movimiento",
   "modificar_cuenta",
   "fusionar_categorias",
@@ -493,11 +499,6 @@ export function mcpSpecs(
         `SELECT * FROM ${schema}.audit_log`,
       ])
         await failure("consulta_sql", { sql }, /permisos|vistas autorizadas/i);
-      await failure(
-        "consulta_sql",
-        { sql: "SELECT 1 INTO OUTFILE 'finance_m006_test.txt'" },
-        /permisos|solo lectura/i,
-      );
       const start = performance.now();
       await failure("consulta_sql", { sql: "SELECT SLEEP(10)" }, /5 segundos/i);
       expect(performance.now() - start).toBeGreaterThan(4000);
@@ -713,6 +714,222 @@ export function mcpSpecs(
         movimientos: [{ descripcion: stored }],
       });
       expect(JSON.stringify(result.content)).not.toContain(stored);
+    });
+
+    test("S13: ambos recortes cierran sus consultas y el lector sigue disponible", async () => {
+      const consulta = (sql: string) => success("consulta_sql", { sql });
+      const [bytes, rows] = await Promise.all([
+        consulta("SELECT REPEAT('x',1000) FROM seq_1_to_100000000"),
+        consulta("SELECT CONNECTION_ID() AS conexion FROM seq_1_to_100000000"),
+      ]);
+      expect(bytes).toMatchObject({
+        recortado: true,
+        aviso: expect.stringMatching(/64 KB/),
+      });
+      expect(bytes.filas).not.toHaveLength(0);
+      expect(Buffer.byteLength(JSON.stringify(bytes))).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      expect(rows).toMatchObject({
+        recortado: true,
+        aviso: expect.stringMatching(/500 filas/),
+      });
+      expect(rows.filas).toHaveLength(500);
+
+      const probe = await createConnection({
+        ...localDatabase("READONLY_DATABASE_URL"),
+        database: readonly,
+      });
+      try {
+        const [{ conexion }] = rows.filas as { conexion: string | number }[];
+        await expect
+          .poll(
+            async () => {
+              const [sessions] = await probe.query<RowDataPacket[]>(
+                "SELECT ID FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND (ID = ? OR INFO LIKE ?)",
+                [conexion, "%REPEAT('x',1000) FROM seq_1_to_100000000%"],
+              );
+              return sessions;
+            },
+            { timeout: 2_000 },
+          )
+          .toEqual([]);
+      } finally {
+        await probe.end();
+      }
+
+      await delay(10_000);
+      const [first, second, ping] = await Promise.all([
+        consulta("SELECT 1 AS n"),
+        consulta("SELECT 2 AS n"),
+        success("ping"),
+      ]);
+      expect(first).toMatchObject({ filas: [{ n: 1 }], recortado: false });
+      expect(second).toMatchObject({ filas: [{ n: 2 }], recortado: false });
+      expect(ping).toMatchObject({ message: "pong" });
+    }, 20_000);
+
+    test("S14: la ruta conserva ancestros archivados y se protege a las hijas activas", async () => {
+      for (const [tipo, subtipo] of [
+        ["asset", "efectivo"],
+        ["liability", "tarjeta_credito"],
+      ]) {
+        const parentName = `Padre S14 ${tipo}`;
+        const childName = `Hija S14 ${tipo}`;
+        const create = { tipo, subtipo, moneda: "BOB" };
+        const parent = await write("crear_cuenta", {
+          ...create,
+          nombre: parentName,
+        });
+        const child = await write("crear_cuenta", {
+          ...create,
+          nombre: childName,
+          padre: parent.id,
+        });
+        await failure(
+          "modificar_cuenta",
+          { cuenta: parent.id, accion: "archivar" },
+          /hijas activas/i,
+        );
+        await migration().execute(
+          "UPDATE accounts SET archived_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [parent.id],
+        );
+
+        const ruta = `${parentName} > ${childName}`;
+        const { cuentas } = await success("listar_cuentas", { limite: 200 });
+        expect(cuentas).toContainEqual(
+          expect.objectContaining({
+            id: child.id,
+            ruta,
+            archivada: false,
+            ancestros_archivados: [parent.id],
+          }),
+        );
+        expect(cuentas).not.toContainEqual(
+          expect.objectContaining({ id: parent.id }),
+        );
+        expect(
+          (
+            await success("listar_cuentas", {
+              incluir_archivadas: true,
+              limite: 200,
+            })
+          ).cuentas,
+        ).toContainEqual(
+          expect.objectContaining({ id: parent.id, archivada: true }),
+        );
+        expect(await balance(ruta)).toMatchObject({ id: child.id });
+        await failure("ver_saldo", { cuenta: parentName }, /no se encontró/i);
+      }
+    });
+
+    test.each([
+      [
+        "SELECT 1 INTO OUTFILE 'finance_m006b_test.txt'",
+        /La consulta requiere permisos de solo lectura sobre las vistas autorizadas\./,
+      ],
+      [
+        "SELECT 1 INTO DUMPFILE 'finance_m006b_test.bin'",
+        /La consulta requiere permisos de solo lectura sobre las vistas autorizadas\./,
+      ],
+      [
+        "SELECT 1 /*! + 1 */",
+        /La consulta no admite comentarios ejecutables\./,
+      ],
+      [
+        "SELECT 1 /*M! + 1 */",
+        /La consulta no admite comentarios ejecutables\./,
+      ],
+    ])("S15: %s devuelve un rechazo específico", async (sql, message) => {
+      await failure("consulta_sql", { sql }, message);
+    });
+
+    test("S16: los saldos usan la unidad mínima registrada de la moneda", async () => {
+      await migration().execute(
+        "INSERT INTO currencies (code, name, minor_unit) VALUES ('TST', 'Prueba S16', 3)",
+      );
+      const funded = await account("Caja S16", "TST", "1234,567");
+      const empty = await account("Caja vacía S16", "TST");
+      const formatted = {
+        monto: "1234.567",
+        moneda: "TST",
+        texto: "1.234,567 TST",
+      };
+      const { cuentas } = await success("listar_cuentas", {
+        fecha: date,
+        limite: 200,
+      });
+      expect(cuentas).toContainEqual(
+        expect.objectContaining({ id: funded.id, saldos: [formatted] }),
+      );
+      expect(cuentas).toContainEqual(
+        expect.objectContaining({
+          id: empty.id,
+          saldos: [{ monto: "0.000", moneda: "TST", texto: "0,000 TST" }],
+        }),
+      );
+      expect(
+        (await success("patrimonio_neto", { fecha: date })).no_valuadas,
+      ).toContainEqual(
+        expect.objectContaining({ id: funded.id, ...formatted }),
+      );
+    });
+
+    test("S17: el resumen explica el alcance y editar se anuncia como destructivo", async () => {
+      const { tools } = await sdk.listTools();
+      expect(
+        tools.find(({ name }) => name === "editar_movimiento")?.annotations
+          ?.destructiveHint,
+      ).toBe(true);
+      const totalsRule = /totales incluye todas las categorías de la rama/i;
+      const breakdownRule = /desglose.*archivadas.*incluir_archivadas/i;
+      const description = tools.find(
+        ({ name }) => name === "resumen_periodo",
+      )?.description;
+      expect(description).toMatch(totalsRule);
+      expect(description).toMatch(breakdownRule);
+
+      const cuenta = (await account("Caja S17", "BOB", "100")).id;
+      const parent = await category("Rama S17");
+      const active = await category("Activa S17", parent.id);
+      const archived = await category("Archivada S17", parent.id);
+      await write(
+        "registrar_gasto",
+        expense("Activo S17", "11", cuenta, active.id),
+      );
+      await write(
+        "registrar_gasto",
+        expense("Archivado S17", "19", cuenta, archived.id),
+      );
+      await write("modificar_cuenta", {
+        cuenta: archived.id,
+        accion: "archivar",
+      });
+
+      for (const incluir_archivadas of [false, true]) {
+        const args = {
+          desde: date,
+          hasta: date,
+          categoria: parent.id,
+          incluir_archivadas,
+        };
+        const result = await call("resumen_periodo", args);
+        expect(result.isError).not.toBe(true);
+        const data = result.structuredContent;
+        expect(data).toMatchObject({
+          totales: [{ gastos: { monto: "30.00" } }],
+          categorias: incluir_archivadas
+            ? [
+                { id: active.id },
+                { id: archived.id, totales: [{ monto: "19.00" }] },
+              ]
+            : [{ id: active.id, totales: [{ monto: "11.00" }] }],
+        });
+        const message = JSON.stringify(result.content);
+        expect(message).toMatch(totalsRule);
+        expect(message).toMatch(breakdownRule);
+      }
     });
   });
 }

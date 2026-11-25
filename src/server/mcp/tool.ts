@@ -59,8 +59,15 @@ export const money = z.object({
   texto: z.string(),
 });
 
-export function amount(amount: bigint, moneda: string) {
-  const formatted = formatAmount(amount, moneda);
+export function amount(
+  amount: bigint,
+  moneda: string,
+  scales: ReadonlyMap<string, number>,
+) {
+  const scale = scales.get(moneda);
+  if (scale === undefined)
+    throw new Error(`Falta la unidad mínima de ${moneda}.`);
+  const formatted = formatAmount(amount, moneda, scale);
   return {
     monto: formatted.replaceAll(".", "").replace(",", "."),
     moneda,

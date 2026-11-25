@@ -7,7 +7,7 @@ type Database = Kysely<LedgerDatabase>;
 type Page = { limit: number; after?: string };
 
 export async function getAccountTree(db: Database, includeArchived: boolean) {
-  let query = db
+  const accounts = await db
     .selectFrom("accounts")
     .select([
       "id",
@@ -18,12 +18,15 @@ export async function getAccountTree(db: Database, includeArchived: boolean) {
       "currency",
       "archived_at",
     ])
-    .orderBy("id");
-  if (!includeArchived) query = query.where("archived_at", "is", null);
-  const accounts = await query.execute();
+    .orderBy("id")
+    .execute();
   const byId = new Map(accounts.map((account) => [account.id, account]));
-  return accounts.map((account) => {
+  const visible = includeArchived
+    ? accounts
+    : accounts.filter(({ archived_at }) => archived_at === null);
+  return visible.map((account) => {
     const names = [account.name];
+    const archivedAncestors: string[] = [];
     const seen = new Set([account.id]);
     for (let parent = account.parent_id; parent;) {
       if (seen.has(parent))
@@ -32,9 +35,14 @@ export async function getAccountTree(db: Database, includeArchived: boolean) {
       const node = byId.get(parent);
       if (!node) break;
       names.push(node.name);
+      if (node.archived_at !== null) archivedAncestors.push(node.id);
       parent = node.parent_id;
     }
-    return { ...account, path: names.reverse().join(" > ") };
+    return {
+      ...account,
+      path: names.reverse().join(" > "),
+      archivedAncestors: archivedAncestors.reverse(),
+    };
   });
 }
 

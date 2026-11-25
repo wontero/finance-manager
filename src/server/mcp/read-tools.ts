@@ -44,6 +44,8 @@ const transactionCursor = z
   }, "Usa el cursor devuelto por la búsqueda.")
   .optional();
 const amounts = z.array(money);
+const summaryScope =
+  "El campo totales incluye todas las categorías de la rama consultada, incluso las archivadas. Sin rama, abarca todos los ingresos y gastos. El desglose muestra filas archivadas solo con incluir_archivadas. Cada fila suma sus descendientes.";
 const movement = z.object({
   id: rowId,
   fecha: z.string(),
@@ -80,6 +82,7 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
           subtipo: z.string().nullable(),
           moneda: z.string().nullable(),
           archivada: z.boolean(),
+          ancestros_archivados: z.array(rowId),
           saldos: amounts,
         }),
       ),
@@ -96,12 +99,13 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
         page.rows.map(({ id }) => id),
         fecha ?? todayLaPaz(),
       );
+      const scales = await ledger.getCurrencyScales();
       const cuentas = page.rows.map((row) => {
         const saldos = balances
           .filter(({ id }) => id === row.id)
-          .map((balance) => amount(balance.amount, balance.currency));
+          .map((balance) => amount(balance.amount, balance.currency, scales));
         if (!saldos.length && row.currency)
-          saldos.push(amount(0n, row.currency));
+          saldos.push(amount(0n, row.currency, scales));
         return {
           id: row.id,
           padre: row.parent_id,
@@ -111,6 +115,7 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
           subtipo: row.subtype,
           moneda: row.currency,
           archivada: row.archived_at !== null,
+          ancestros_archivados: row.archivedAncestors,
           saldos,
         };
       });
@@ -130,7 +135,8 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
     async ({ cuenta, fecha = todayLaPaz(), incluir_archivadas }) => {
       const id = (await accountLookup(ledger, incluir_archivadas))(cuenta);
       const balance = await ledger.getBalance({ id, date: fecha });
-      const saldo = amount(balance.amount, balance.currency);
+      const scales = await ledger.getCurrencyScales();
+      const saldo = amount(balance.amount, balance.currency, scales);
       return [{ id, fecha, saldo }, `Saldo al ${fecha}: ${saldo.texto}.`];
     },
   );
@@ -153,9 +159,10 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
     "read",
     async ({ fecha = todayLaPaz() }) => {
       const worth = await ledger.getNetWorth({ date: fecha });
-      const total = amount(worth.amount, worth.currency);
+      const scales = await ledger.getCurrencyScales();
+      const total = amount(worth.amount, worth.currency, scales);
       const no_valuadas = worth.unvalued.map((row) => ({
-        ...amount(row.amount, row.currency),
+        ...amount(row.amount, row.currency, scales),
         id: row.id,
         nombre: row.name,
         tipo: row.kind,
@@ -169,7 +176,7 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
   registerTool(
     server,
     "resumen_periodo",
-    "Resume ingresos, gastos y neto por moneda con totales de categorías y descendientes.",
+    "Resume ingresos, gastos y neto por moneda. " + summaryScope,
     z.strictObject({
       ...period,
       ...archived,
@@ -209,24 +216,27 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
         after: cursor,
       });
       const page = paginate(summary.categories, limite, ({ id }) => id);
+      const scales = await ledger.getCurrencyScales();
       return [
         {
           desde: from,
           hasta: to,
           cursor: page.cursor,
           totales: summary.totals.map(({ currency, income, expense }) => ({
-            ingresos: amount(income, currency),
-            gastos: amount(expense, currency),
-            neto: amount(income - expense, currency),
+            ingresos: amount(income, currency, scales),
+            gastos: amount(expense, currency, scales),
+            neto: amount(income - expense, currency, scales),
           })),
           categorias: page.rows.map(({ id, name, kind, amounts }) => ({
             id,
             nombre: name,
             tipo: kind,
-            totales: amounts.map((row) => amount(row.amount, row.currency)),
+            totales: amounts.map((row) =>
+              amount(row.amount, row.currency, scales),
+            ),
           })),
         },
-        `Resumen del ${from} al ${to}. Categorías en esta página: ${page.rows.length}.`,
+        `Resumen del ${from} al ${to}. Categorías en esta página: ${page.rows.length}. ${summaryScope}`,
       ];
     },
   );
@@ -268,6 +278,7 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
         before: date && id ? { date, id } : undefined,
       });
       const last = result.entries.at(-1);
+      const scales = await ledger.getCurrencyScales();
       const movimientos = result.entries.map((row) => ({
         id: row.id,
         fecha: row.date,
@@ -283,7 +294,7 @@ export function registerReads(server: ToolServer, ledger: Ledger) {
         lineas: row.postings.map((line) => {
           const units = BigInt(line.amount);
           return {
-            ...amount(units < 0n ? -units : units, line.currency),
+            ...amount(units < 0n ? -units : units, line.currency, scales),
             cuenta: line.account_id,
             lado: units < 0n ? ("credit" as const) : ("debit" as const),
             nota: line.memo,

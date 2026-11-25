@@ -245,6 +245,15 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       reports.getAccountTree(db, includeArchived),
     listAccountBalances: (ids: string[], date: string) =>
       read((trx) => reports.getAccountBalances(trx, ids, date)),
+    async getCurrencyScales() {
+      const currencies = await db
+        .selectFrom("currencies")
+        .select(["code", "minor_unit"])
+        .execute();
+      return new Map(
+        currencies.map(({ code, minor_unit }) => [code, minor_unit]),
+      );
+    },
     getPeriodSummary: (input: Parameters<typeof reports.getPeriodSummary>[1]) =>
       read((trx) => reports.getPeriodSummary(trx, input)),
     findTransactions: (input: Parameters<typeof reports.findTransactions>[1]) =>
