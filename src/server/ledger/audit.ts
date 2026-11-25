@@ -389,10 +389,14 @@ export class LedgerWrite {
         );
       const row = await this.row(table, key);
       const current = row ? snapshot(row) : null;
-      if (after === null && sameState(current, before)) continue;
-      const later = await this.laterChange(item, sameState(current, after));
+      const alreadyRestored = after === null && sameState(current, before);
+      const later = await this.laterChange(
+        item,
+        alreadyRestored || sameState(current, after),
+      );
       if (later) conflicts.push(`${table}/${item.row_id} (${later})`);
-      changes.push({ table, key, before, after, rowId: item.row_id });
+      else if (!alreadyRestored)
+        changes.push({ table, key, before, after, rowId: item.row_id });
     }
     if (conflicts.length)
       throw new Error(

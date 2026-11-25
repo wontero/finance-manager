@@ -33,3 +33,9 @@ test("S23: trim amounts and explain ambiguous separators", () => {
       /formato ambiguo.*1\.234,00.*1234\.00/i,
     );
 });
+
+test("S29: only report ambiguity for a possible thousands group beyond the currency scale", () => {
+  expect(() => parseAmount("1.234", 2)).toThrow(/formato ambiguo/i);
+  expect(() => parseAmount("1234.500", 2)).toThrow(/admite hasta 2 decimales/i);
+  expect(parseAmount("0.125", 3)).toBe(125n);
+});

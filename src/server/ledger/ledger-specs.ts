@@ -1008,15 +1008,30 @@ export function ledgerSpecs(
       expect(await counts()).toEqual(before);
     });
 
-    test("S25: undo older snapshots and reinsert rows with the new default", async () => {
+    test("S25: undo older snapshots and preserve future columns on updates", async () => {
       const entry = await expense();
       const undo = await ledger.undoOperation(entry.operationId);
       const another = await expense();
+      const edited = await ledger.editTransaction({
+        id: another.id,
+        description: "Almuerzo editado",
+      });
       const migration = connections().migration;
       await migration.query(
         "ALTER TABLE transactions ADD COLUMN future_field INT NOT NULL DEFAULT 42",
       );
       try {
+        await migration.execute(
+          "UPDATE transactions SET future_field = 97 WHERE id = ?",
+          [another.id],
+        );
+        await ledger.undoOperation(edited.operationId!);
+        expect(await transactions(another.id)).toEqual([
+          expect.objectContaining({
+            description: "Almuerzo",
+            future_field: 97,
+          }),
+        ]);
         await ledger.undoOperation(another.operationId);
         expect(await transactions(another.id)).toEqual([]);
         await ledger.undoOperation(undo.operationId);
@@ -1028,6 +1043,81 @@ export function ledgerSpecs(
           "ALTER TABLE transactions DROP COLUMN future_field",
         );
       }
+    });
+
+    test("S27: a later tag reattachment blocks undo until reversed", async () => {
+      const tagName = name("Etiqueta reasignada");
+      const entry = await ledger.createTransaction({
+        ...draft(),
+        tags: [tagName],
+      });
+      const associations = () =>
+        rows("SELECT * FROM transaction_tags WHERE transaction_id = ?", [
+          entry.id,
+        ]);
+      const original = await associations();
+      expect(original).toHaveLength(1);
+      const removed = await ledger.editTransaction({ id: entry.id, tags: [] });
+      const restored = await ledger.editTransaction({
+        id: entry.id,
+        tags: [tagName],
+      });
+      const before = await counts();
+      await expect(ledger.undoOperation(removed.operationId!)).rejects.toThrow(
+        restored.operationId!,
+      );
+      expect(await counts()).toEqual(before);
+      expect(await associations()).toEqual(original);
+      await ledger.undoOperation(restored.operationId!);
+      expect(await associations()).toEqual([]);
+      await ledger.undoOperation(removed.operationId!);
+      expect(await associations()).toEqual(original);
+    });
+
+    test("S27: a later exchange rate re-registration blocks undo until reversed", async () => {
+      const pair = { from: "BOB", to: "USD", date: "2040-01-01" };
+      const key = { ...pair, source: name("Tipo de cambio") };
+      const original = await ledger.recordExchangeRate({
+        ...key,
+        rate: "0.14",
+      });
+      const removed = await ledger.undoOperation(original.operationId);
+      const changed = await ledger.recordExchangeRate({ ...key, rate: "0.15" });
+      const restored = await ledger.recordExchangeRate({
+        ...key,
+        rate: "0.14",
+      });
+      await expect(ledger.undoOperation(removed.operationId)).rejects.toThrow(
+        restored.operationId,
+      );
+      expect(await ledger.getExchangeRate(pair)).toEqual(original.rate);
+      await ledger.undoOperation(restored.operationId);
+      expect(await ledger.getExchangeRate(pair)).toEqual(changed.rate);
+      await ledger.undoOperation(changed.operationId);
+      await expect(ledger.getExchangeRate(pair)).rejects.toThrow(
+        /sin tipo de cambio/i,
+      );
+      await ledger.undoOperation(removed.operationId);
+      expect(await ledger.getExchangeRate(pair)).toEqual(original.rate);
+    });
+
+    test("S28: archiving a funded asset gives the archive message", async () => {
+      const accountName = name("Cuenta con saldo");
+      const { id } = await ledger.createAccount({
+        name: accountName,
+        kind: "asset",
+        subtype: "efectivo",
+        currency: "BOB",
+        opening: { amount: "12,34", date },
+      });
+      const before = await counts();
+      await expect(ledger.archiveAccount({ id })).rejects.toThrow(
+        `La cuenta "${accountName}" tiene saldo 12,34 BOB. Concíliala o transfiere el saldo antes de archivarla.`,
+      );
+      expect(await counts()).toEqual(before);
+      expect(
+        await rows("SELECT archived_at FROM accounts WHERE id = ?", [id]),
+      ).toEqual([{ archived_at: null }]);
     });
   });
 }

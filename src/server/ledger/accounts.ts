@@ -1,4 +1,5 @@
 import {
+  formatAmount,
   parseAmount,
   todayLaPaz,
   type LedgerInput,
@@ -139,7 +140,19 @@ export async function moveAccount(
 
 export async function archiveAccount(write: LedgerWrite, id: string) {
   const account = await mutableAccount(write, id);
-  if (account.kind !== "asset" && account.kind !== "liability") {
+  if (account.kind === "asset" || account.kind === "liability") {
+    const balance = naturalAmount(
+      account.kind,
+      await getAccountTotal(write.db, id),
+    );
+    if (balance !== 0n) {
+      const currency = account.currency!;
+      const scale = await minorUnit(write.db, currency);
+      throw new Error(
+        `La cuenta "${account.name}" tiene saldo ${formatAmount(balance, currency, scale)} ${currency}. Concíliala o transfiere el saldo antes de archivarla.`,
+      );
+    }
+  } else {
     const child = await write.db
       .selectFrom("accounts")
       .select("id")
