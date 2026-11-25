@@ -48,7 +48,59 @@ const socketSchema = z
   )
   .optional();
 
+const redirectSchema = z
+  .string()
+  .max(2048)
+  .refine((value) => {
+    if (!URL.canParse(value) || /[\s*#]/.test(value)) return false;
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    );
+  }, "OAUTH_ALLOWED_REDIRECT_URIS debe incluir solo URLs HTTPS exactas");
+
 const configSchema = z.object({
+  NODE_ENV: z.string().optional(),
+  PUBLIC_URL: z
+    .string()
+    .max(2000)
+    .refine((value) => {
+      if (!URL.canParse(value)) return false;
+      const url = new URL(value);
+      const loopback =
+        url.hostname === "localhost" || url.hostname === "127.0.0.1";
+      return (
+        (url.protocol === "https:" || (loopback && url.protocol === "http:")) &&
+        url.href === `${url.origin}/`
+      );
+    }, "PUBLIC_URL debe indicar un origen HTTPS o HTTP en localhost")
+    .optional(),
+  OAUTH_ALLOWED_REDIRECT_URIS: z
+    .string()
+    .transform((value) => value.split(",").map((uri) => uri.trim()))
+    .pipe(z.array(redirectSchema).min(1))
+    .default([
+      "https://claude.ai/api/mcp/auth_callback",
+      "https://claude.com/api/mcp/auth_callback",
+    ]),
+  TOTP_ENCRYPTION_KEY: z
+    .string()
+    .refine(
+      (value) =>
+        /^[A-Za-z0-9+/]{43}=$/.test(value) &&
+        Buffer.from(value, "base64").toString("base64") === value,
+      "TOTP_ENCRYPTION_KEY debe contener 32 bytes en base64",
+    )
+    .transform((value) => Buffer.from(value, "base64"))
+    .optional(),
+  TRUST_PROXY: z
+    .enum(["loopback", "off"], {
+      error: "TRUST_PROXY debe ser loopback u off",
+    })
+    .default("off"),
   PORT: z
     .string()
     .regex(/^\d+$/, portError)
@@ -93,11 +145,37 @@ function connectionOptions(
 export function readConfig(env: NodeJS.ProcessEnv) {
   const config = parseConfig(configSchema, env);
   const { DATABASE_URL: database, DATABASE_SOCKET: socketPath } = config;
+  const issuer = new URL(
+    config.PUBLIC_URL ?? `http://localhost:${config.PORT}`,
+  );
+  if (
+    config.NODE_ENV === "production" &&
+    database &&
+    (!config.PUBLIC_URL ||
+      issuer.protocol !== "https:" ||
+      !config.TOTP_ENCRYPTION_KEY)
+  ) {
+    throw new Error(
+      "Configura PUBLIC_URL con HTTPS y TOTP_ENCRYPTION_KEY para activar la autenticación en producción.",
+    );
+  }
   return {
     port: config.PORT,
     database: database && connectionOptions(database, socketPath),
     webDistDir: resolve(config.WEB_DIST_DIR),
     version: config.APP_VERSION,
+    auth: {
+      issuer,
+      resource: new URL("/mcp", issuer),
+      redirects: config.OAUTH_ALLOWED_REDIRECT_URIS,
+      encryptionKey: config.TOTP_ENCRYPTION_KEY,
+      secureCookies:
+        config.NODE_ENV === "production" || issuer.protocol === "https:",
+      trustProxy:
+        config.TRUST_PROXY === "loopback"
+          ? ("loopback" as const)
+          : (false as const),
+    },
   };
 }
 
