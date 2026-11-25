@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import {
   createConnection,
@@ -33,21 +32,4 @@ test("S5: health reports a working connection to local MariaDB", async () => {
     .get("/health")
     .expect(200);
   expect(response.body.db).toBe("ok");
-});
-
-test("the migration user can create and drop a table in finance_test but cannot read mysql", async () => {
-  const migration = await createConnection({
-    ...localDatabase("MIGRATION_DATABASE_URL"),
-    database: "finance_test",
-  });
-  const table = `m001_${randomUUID().replaceAll("-", "")}`;
-  try {
-    await migration.query(`CREATE TABLE ${table} (id INT PRIMARY KEY)`);
-    await expect(migration.query("USE mysql")).rejects.toMatchObject({
-      code: "ER_DBACCESS_DENIED_ERROR",
-    });
-    await migration.query(`DROP TABLE ${table}`);
-  } finally {
-    await migration.end();
-  }
 });

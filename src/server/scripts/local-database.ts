@@ -34,3 +34,15 @@ export function localDatabase(name: string) {
     connectTimeout: 1500,
   };
 }
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { Connection, RowDataPacket } from "mysql2/promise";
+
+export async function checkLocalDataDir(connection: Connection, port: number) {
+  const dataDir = await realpath(setting("MARIADB_DATA_DIR"));
+  const [[row]] = await connection.query<RowDataPacket[]>(
+    "SELECT @@datadir AS dataDir",
+  );
+  if (resolve(row.dataDir).toLowerCase() !== resolve(dataDir).toLowerCase())
+    throw new Error(`El puerto ${port} pertenece a otra instancia de MariaDB`);
+}

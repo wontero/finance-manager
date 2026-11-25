@@ -41,6 +41,7 @@ let app: Connection;
 let reader: Connection;
 let reportingAccount: string;
 let transaction: string;
+let operationCreated = false;
 
 function migrate() {
   const url = new URL(setting("MIGRATION_DATABASE_URL"));
@@ -68,7 +69,9 @@ beforeAll(async () => {
     supportBigNumbers: true,
     bigNumberStrings: true,
   });
-  const [existing] = await migration.query<RowDataPacket[]>("SHOW FULL TABLES");
+  const [existing] = await migration.query<RowDataPacket[]>(
+    "SHOW TABLES LIKE 'currencies'",
+  );
   const output = migrate();
   expect(output).toMatch(
     existing.length ? /Sin migraciones pendientes/ : /Migración aplicada:/,
@@ -89,6 +92,7 @@ beforeAll(async () => {
     "INSERT INTO operations (id, actor, description) VALUES (?, 'system', 'Prueba M-003')",
     [uuid],
   );
+  operationCreated = true;
   await migration.execute(
     "INSERT INTO transactions (date, description, operation_id) VALUES ('2026-11-24', 'Prueba M-003', ?)",
     [uuid],
@@ -113,7 +117,8 @@ afterAll(async () => {
         transaction,
       ]);
     }
-    await migration.execute("DELETE FROM operations WHERE id = ?", [uuid]);
+    if (operationCreated)
+      await migration.execute("DELETE FROM operations WHERE id = ?", [uuid]);
   } finally {
     await migration.end();
   }
@@ -374,4 +379,16 @@ test("S10: the app cannot create or drop tables or access the reader schema", as
     "SELECT * FROM finance_test_ro.v_accounts",
   ])
     await expect(app.query(statement)).rejects.toMatchObject(permissionDenied);
+});
+
+test("S12: the migration user can create and drop in finance_test but cannot read mysql", async () => {
+  const table = `m001_${uuid.replaceAll("-", "")}`;
+  await migration.query(`CREATE TABLE ${table} (id INT PRIMARY KEY)`);
+  try {
+    await expect(migration.query("USE mysql")).rejects.toMatchObject({
+      code: "ER_DBACCESS_DENIED_ERROR",
+    });
+  } finally {
+    await migration.query(`DROP TABLE ${table}`);
+  }
 });

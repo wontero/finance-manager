@@ -20,7 +20,9 @@
     "format:check": "prettier --check src app.js \"*.json\" \"*.mjs\" \"*.ts\" README.md docs/arquitectura/arquitectura.md docs/operacion/despliegue.md",
     "dev": "concurrently --kill-others --names server,web \"tsx watch --env-file-if-exists=.env src/server/index.ts\" \"npm run dev --workspace @finance-manager/web\"",
     "db:start": "tsx --env-file=.env src/server/scripts/database.ts start",
-    "db:stop": "tsx --env-file=.env src/server/scripts/database.ts stop"
+    "db:stop": "tsx --env-file=.env src/server/scripts/database.ts stop",
+    "db:setup": "tsx --env-file=.env src/server/scripts/setup-database.ts",
+    "migrate": "node --env-file-if-exists=.env src/server/dist/migrate.js"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",

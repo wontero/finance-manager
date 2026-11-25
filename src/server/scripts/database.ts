@@ -3,8 +3,8 @@ import { realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import mariadb from "mariadb";
-import { localDatabase, setting } from "./local-database.js";
+import { createConnection as connectDatabase } from "mysql2/promise";
+import { checkLocalDataDir, localDatabase, setting } from "./local-database.js";
 
 function isListening(port: number) {
   return new Promise<boolean>((finish) => {
@@ -69,18 +69,13 @@ async function manageDatabase(action: string) {
     );
   }
 
-  const connection = await mariadb.createConnection(credentials).catch(() => {
+  const connection = await connectDatabase(credentials).catch(() => {
     throw new Error(
       `No se pudo autenticar en MariaDB local (puerto ${port}). Comprueba .env`,
     );
   });
   try {
-    const [row] = await connection.query("SELECT @@datadir AS dataDir");
-    if (resolve(row.dataDir).toLowerCase() !== resolve(dataDir).toLowerCase()) {
-      throw new Error(
-        `El puerto ${port} pertenece a otra instancia de MariaDB`,
-      );
-    }
+    await checkLocalDataDir(connection, port);
     if (action === "stop") await connection.query("SHUTDOWN");
   } finally {
     await connection.end();
@@ -101,4 +96,15 @@ const action = process.argv[2];
 if (action !== "start" && action !== "stop")
   throw new Error("Usa start o stop");
 
-await manageDatabase(action);
+try {
+  await manageDatabase(action);
+} catch (error) {
+  const detail =
+    error instanceof Error && "code" in error
+      ? error.code
+      : error instanceof Error
+        ? error.message
+        : "Fallo desconocido.";
+  console.error(`No se pudo gestionar MariaDB local. ${detail}`);
+  process.exitCode = 1;
+}

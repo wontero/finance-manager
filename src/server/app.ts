@@ -3,43 +3,24 @@ import { APP_NAME } from "@finance-manager/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
-import mariadb, { type Connection } from "mariadb";
 import type { readConfig } from "./config.js";
+import { checkDatabase, createDatabase } from "./database.js";
 
 type Config = ReturnType<typeof readConfig>;
-
-async function databaseStatus(database: Config["database"]) {
-  if (!database) return "not_configured";
-
-  let connection: Connection | undefined;
-  try {
-    connection = await mariadb.createConnection({
-      ...database,
-      connectTimeout: 750,
-      socketTimeout: 750,
-      queryTimeout: 750,
-    });
-    await connection.query("SELECT 1");
-    return "ok";
-  } catch {
-    return "unavailable";
-  } finally {
-    connection?.destroy();
-  }
-}
 
 export function createApp(
   { database, webDistDir, version }: Config,
   release?: string,
 ) {
   const app = express();
-  let probe: ReturnType<typeof databaseStatus> | undefined;
+  const pool = database && createDatabase(database).pool;
+  let probe: ReturnType<typeof checkDatabase> | undefined;
   let expiresAt = Infinity;
 
   app.get("/health", async (_request, response) => {
     if (!probe || performance.now() >= expiresAt) {
       expiresAt = Infinity;
-      probe = databaseStatus(database).finally(() => {
+      probe = checkDatabase(pool).finally(() => {
         expiresAt = performance.now() + 10_000;
       });
     }
