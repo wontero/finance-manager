@@ -12,6 +12,7 @@ import {
 } from "mysql2/promise";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { createDatabase } from "./database.js";
+import { ledgerSpecs } from "./ledger/ledger-specs.js";
 import {
   checkLocalDataDir,
   localDatabase,
@@ -786,3 +787,5 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
     await rm(fixture, { recursive: true, force: true });
   }
 }, 30_000);
+
+ledgerSpecs(() => ({ migration, reader }));
