@@ -11,6 +11,8 @@ import { registerTool } from "./tool.js";
 import { registerWrites } from "./write-tools.js";
 
 const instructions = [
+  "Responde breve y directo, en una o dos líneas, salvo que Mateo pida detalle.",
+  "Para totales, saldos o resúmenes, da solo el resultado final: no muestres cálculos, sumas intermedias ni el razonamiento, salvo que Mateo los pida. Tras registrar o deshacer algo, confirma en una línea con el monto y el ID de la operación.",
   "La moneda base es BOB. Usa USD solo si Mateo lo indica.",
   "Para valuar USD, busca en la web el tipo de cambio referencial de venta del BCB para ese día y regístralo con su fuente: incluye la referencia y el enlace.",
   "La fecha contable no tiene hora: usa AAAA-MM-DD y, si se omite, hoy en America/La_Paz.",

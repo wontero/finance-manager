@@ -8,6 +8,10 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 - Dashboard web con inicio de sesión, resumen, movimientos con filtros, informes y deshacer desde la actividad.
 
+### Cambiado
+
+- Las instrucciones del servidor MCP piden respuestas breves y resultados finales sin cálculos intermedios.
+
 ### Corregido
 
 - La comprobación de salud del despliegue usa un User-Agent propio para evitar el rechazo de ModSecurity al User-Agent por defecto de `curl`.
