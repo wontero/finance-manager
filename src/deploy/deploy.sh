@@ -237,10 +237,11 @@ run_logged() {
 [[ -d $repo ]] || git init --quiet --bare "$repo"
 run_logged git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" ||
   fail "No se pudo descargar la ref. Revisa la URL, la ref y la deploy key. Log: $log"
+release_commit=$(git -C "$repo" rev-parse 'FETCH_HEAD^{commit}')
 
 mkdir -- "$release_dir"
 staged=$release_dir
-git -C "$repo" archive FETCH_HEAD | tar -x -C "$staged"
+git -C "$repo" archive "$release_commit" | tar -x -C "$staged"
 ln -s -- "$shared/logs" "$staged/logs"
 (
   cd -- "$staged"
@@ -254,6 +255,7 @@ ln -s -- "$shared/logs" "$staged/logs"
     options=${DEPLOY_DB_OPTIONS:-$shared/mysql.cnf}
     [[ $database =~ ^[a-zA-Z0-9_]+$ && -r $options ]] ||
       fail 'Configura DEPLOY_DB_NAME y el archivo de opciones de MariaDB antes de migrar.'
+    options=$(realpath -s -- "$options")
     node -e '
       const { readFileSync } = require("node:fs");
       const { parseEnv } = require("node:util");
@@ -275,8 +277,21 @@ ln -s -- "$shared/logs" "$staged/logs"
       fail "Falló la copia de MariaDB. No se ejecutó la migración. Log: $log"
     fi
     if ! run_logged npm run migrate >/dev/null; then
-      restore_database >/dev/null ||
-        fail "Fallaron la migración y la restauración. Conserva la copia $backup para recuperar la BD. Log: $log"
+      if ! restore_database >/dev/null; then
+        echo "Fallaron la migración y la restauración. Advertencia: la base principal puede haber quedado parcial y sin triggers de bitácora. Conserva el volcado $backup. Log: $log" >&2
+        # The failed release is removed on exit. Reload its restore code by commit.
+        printf 'Para reintentar la restauración, ejecuta: flock -n -- %q bash -c %q _ %q %q %q %q %q\n' \
+          "$lock" 'set -euo pipefail
+dir=$(mktemp -d)
+cleanup_retry() { rm -rf -- "$dir"; }
+trap cleanup_retry EXIT
+git -C "$1" archive "$2" src/deploy/database.sh src/deploy/trigger-preflight.sql | tar -x -C "$dir"
+source "$dir/src/deploy/database.sh"
+options=$3 database=$4 backup=$5
+run_logged() { "$@"; }
+restore_database' "$repo" "$release_commit" "$options" "$database" "$backup" >&2
+        exit 1
+      fi
       fail "Falló la migración. Se restauró la copia de MariaDB y current no cambió. Log: $log"
     fi
   fi

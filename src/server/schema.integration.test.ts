@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { sql } from "kysely";
@@ -395,6 +395,32 @@ test("the migration user can create and drop in finance_test but cannot read mys
 });
 
 test("S13: each pooled connection applies strict SQL mode and UTC", async () => {
+  const overflow = "9223372036854775808";
+  const posting =
+    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)";
+  const raw = await createConnection({
+    ...localDatabase("DATABASE_URL"),
+    database: schema,
+  });
+  try {
+    await raw.query("SET SESSION sql_mode = ''");
+    await raw.beginTransaction();
+    await raw.execute(posting, [transaction, reportingAccount, overflow]);
+    expect((await raw.query("SHOW WARNINGS"))[0]).toEqual([
+      expect.objectContaining({ Code: 1264 }),
+    ]);
+    await raw.execute(
+      "INSERT INTO operations (id, actor, description) VALUES (?, 'invalid', 'Prueba S13')",
+      [randomUUID()],
+    );
+    expect((await raw.query("SHOW WARNINGS"))[0]).toEqual([
+      expect.objectContaining({ Code: 1265 }),
+    ]);
+    await raw.rollback();
+  } finally {
+    await raw.end();
+  }
+
   const { pool, db } = createDatabase({
     ...localDatabase("DATABASE_URL"),
     database: schema,
@@ -421,10 +447,7 @@ test("S13: each pooled connection applies strict SQL mode and UTC", async () => 
     await expect(
       pool
         .promise()
-        .execute(
-          "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
-          [transaction, reportingAccount, "9223372036854775808"],
-        ),
+        .execute(posting, [transaction, reportingAccount, overflow]),
     ).rejects.toMatchObject({ errno: 1264 });
     await expect(
       sql`INSERT INTO operations (id, actor, description)
@@ -433,6 +456,63 @@ test("S13: each pooled connection applies strict SQL mode and UTC", async () => 
     for (const client of [reader, migration]) {
       const [rows] = await client.query("SELECT @@session.time_zone AS tz");
       expect(rows).toEqual([{ tz: "+00:00" }]);
+    }
+  } finally {
+    await db.destroy();
+  }
+});
+
+test("S21: MariaDB returns binlog settings as strings and privilege flags as numbers", async () => {
+  const preflight = await readFile(
+    new URL("../deploy/trigger-preflight.sql", import.meta.url),
+    "utf8",
+  );
+  const [rows] = await migration.query<RowDataPacket[]>(preflight);
+  expect(rows).toEqual([
+    {
+      log_bin: expect.stringMatching(/^[01]$/),
+      trust: expect.stringMatching(/^[01]$/),
+      can_trigger: 1,
+      has_super: 0,
+      foreign_definers: 0,
+    },
+  ]);
+});
+
+test("S22: releasing and reacquiring the same connection preserves the session", async () => {
+  const { pool, db } = createDatabase({
+    ...localDatabase("DATABASE_URL"),
+    database: schema,
+    connectionLimit: 1,
+  });
+  const acquire = () => pool.promise().getConnection();
+  const session =
+    "SELECT @@session.time_zone AS tz, @@session.sql_mode AS mode, @s22_marker AS marker";
+  try {
+    const first = await acquire();
+    const threadId = first.threadId;
+    let before;
+    try {
+      // Detect a reset even if server defaults match the pool settings.
+      await first.query("SET @s22_marker = 'retained'");
+      [before] = await first.query<RowDataPacket[]>(session);
+      expect(before[0].tz).toBe("+00:00");
+      expect(before[0].mode.split(",").sort()).toEqual([
+        "ERROR_FOR_DIVISION_BY_ZERO",
+        "NO_ENGINE_SUBSTITUTION",
+        "STRICT_ALL_TABLES",
+      ]);
+      expect(before[0].marker).toBe("retained");
+    } finally {
+      first.release();
+    }
+    const reused = await acquire();
+    try {
+      expect(reused.threadId).toBe(threadId);
+      const [after] = await reused.query(session);
+      expect(after).toEqual(before);
+    } finally {
+      reused.release();
     }
   } finally {
     await db.destroy();

@@ -223,8 +223,21 @@ grep -Fq 'mysqldump: error de prueba' "$log" || fail 'S14: error de mysqldump au
 if grep -Fq 'backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
 
 echo 'export DATABASE_URL = "mysql://user:app%40secret@localhost/finance_test"' >> "$DEPLOY_ROOT/shared/.env"
-if output=$(FAIL_MIGRATE=1 FAIL_RESTORE=1 deploy 2>&1); then fail 'S14: se aceptó una restauración fallida'; fi
+if output=$(DEPLOY_DB_OPTIONS=../../shared/mysql.cnf FAIL_MIGRATE=1 FAIL_RESTORE=1 deploy 2>&1); then
+  fail 'S14: se aceptó una restauración fallida'
+fi
 log=$(log_from_error "$output")
+[[ $output == *'la base principal puede haber quedado parcial y sin triggers de bitácora'* ]] ||
+  fail 'S23: falta la advertencia sobre el estado de la base principal'
+[[ $output =~ (shared/backups/[0-9]{8}-[0-9]{6}\.[a-zA-Z0-9]+\.sql) ]] ||
+  fail 'S23: falta la ruta del volcado'
+failed_backup="$DEPLOY_ROOT/${BASH_REMATCH[1]}"
+[[ -s $failed_backup ]] || fail 'S23: no se conservó el volcado'
+retry=$(sed -n 's/^Para reintentar la restauración, ejecuta: //p' <<< "$output")
+[[ $retry == *"$failed_backup"* ]] || fail 'S23: falta el comando con la ruta del volcado'
+PATH="$DEPLOY_NODE_BIN:$PATH" bash -c "$retry" || fail 'S23: el comando de recuperación falló'
+[[ $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts' ]] || fail 'S23: el reintento dejó objetos ajenos al volcado'
+echo 'PASA M-003C S23'
 grep -Fq 'migrate: error de prueba' "$log" && grep -Fq 'mysql: error de restauración de prueba' "$log" ||
   fail 'S14: error de migración o restauración ausente'
 if grep -Eq 'app%40secret|app@secret|migration@secret|backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
