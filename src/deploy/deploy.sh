@@ -199,6 +199,8 @@ redact_errors() {
       const env = parseEnv(readFileSync(envFile, "utf8"));
       for (const source of [process.env, env]) {
         addUrl(source.DATABASE_URL);
+        addUrl(source.MIGRATION_DATABASE_URL);
+        addUrl(source.READONLY_DATABASE_URL);
         for (const [name, value] of Object.entries(source)) {
           if (/PASSWORD|PASSWD|MYSQL_PWD/i.test(name)) addSecret(value);
         }
@@ -232,6 +234,21 @@ run_logged() {
   return "${result[0]}"
 } 3>&1
 
+restore_database() {
+  local drops
+  drops=$(run_logged mysql --defaults-file="$options" --database="$database" \
+    --batch --skip-column-names --raw --execute="
+      SELECT CONCAT('DROP ', IF(TABLE_TYPE = 'VIEW', 'VIEW', 'TABLE'), ' ',
+                    CHAR(96), REPLACE(TABLE_NAME, CHAR(96), REPEAT(CHAR(96), 2)), CHAR(96), ';')
+      FROM information_schema.tables
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+      ORDER BY TABLE_TYPE DESC, TABLE_NAME") || return 1
+  {
+    printf 'SET FOREIGN_KEY_CHECKS=0;\n%s\nSET FOREIGN_KEY_CHECKS=1;\n' "$drops"
+    cat -- "$backup"
+  } | run_logged mysql --defaults-file="$options" --database="$database" --binary-mode
+}
+
 [[ -d $repo ]] || git init --quiet --bare "$repo"
 run_logged git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" ||
   fail "No se pudo descargar la ref. Revisa la URL, la ref y la deploy key. Log: $log"
@@ -252,14 +269,28 @@ ln -s -- "$shared/logs" "$staged/logs"
     options=${DEPLOY_DB_OPTIONS:-$shared/mysql.cnf}
     [[ $database =~ ^[a-zA-Z0-9_]+$ && -r $options ]] ||
       fail 'Configura DEPLOY_DB_NAME y el archivo de opciones de MariaDB antes de migrar.'
+    node -e '
+      const { readFileSync } = require("node:fs");
+      const { parseEnv } = require("node:util");
+      try {
+        const env = { ...parseEnv(readFileSync(".env", "utf8")), ...process.env };
+        const target = (url) => decodeURIComponent(new URL(url).pathname.slice(1));
+        const name = process.argv[1];
+        if (target(env.MIGRATION_DATABASE_URL) !== name ||
+            (env.DATABASE_URL && target(env.DATABASE_URL) !== name)) process.exitCode = 1;
+      } catch {
+        process.exitCode = 1;
+      }
+    ' "$database" || fail 'DEPLOY_DB_NAME debe coincidir con MIGRATION_DATABASE_URL y, si existe, DATABASE_URL.'
     install -d -m 700 -- "$shared/backups"
     backup=$(mktemp "$shared/backups/${staged##*/}.XXXXXX.sql")
-    if ! run_logged mysqldump --defaults-file="$options" --single-transaction --add-drop-database --databases "$database" > "$backup"; then
+    if ! run_logged mysqldump --defaults-file="$options" --single-transaction "$database" > "$backup" ||
+       [[ ! -s $backup ]]; then
       rm -f -- "$backup"
       fail "Falló la copia de MariaDB. No se ejecutó la migración. Log: $log"
     fi
     if ! run_logged npm run migrate >/dev/null; then
-      run_logged mysql --defaults-file="$options" < "$backup" >/dev/null ||
+      restore_database >/dev/null ||
         fail "Fallaron la migración y la restauración. Conserva la copia $backup para recuperar la BD. Log: $log"
       fail "Falló la migración. Se restauró la copia de MariaDB y current no cambió. Log: $log"
     fi

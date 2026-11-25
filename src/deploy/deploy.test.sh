@@ -75,6 +75,16 @@ set -euo pipefail
 [[ $1 == --defaults-file="$DEPLOY_ROOT/shared/mysql.cnf" ]]
 [[ $2 == --database=finance_test ]]
 if [[ $# -gt 2 ]]; then
+  if [[ $3 == --binary-mode ]]; then
+    echo restore >> "$EVENTS"
+    if [[ ${FAIL_RESTORE:-0} == 1 ]]; then
+      echo 'mysql: error de restauración de prueba backup-secret' >&2
+      exit 1
+    fi
+    [[ $(cat) == $'SET FOREIGN_KEY_CHECKS=0;\nDROP VIEW `v_accounts`;\nDROP TABLE `accounts`;\nDROP TABLE `orphan`;\nSET FOREIGN_KEY_CHECKS=1;\nCREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;' ]]
+    printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
+    exit 0
+  fi
   [[ $3 == --batch && $4 == --skip-column-names && $5 == --raw && $6 == --execute=* ]]
   [[ $6 == *information_schema.tables* && $6 == *'DATABASE()'* ]]
   echo inspect >> "$EVENTS"
@@ -83,16 +93,10 @@ if [[ $# -gt 2 ]]; then
       v_*) printf 'DROP VIEW `%s`;\n' "$name" ;;
       *) printf 'DROP TABLE `%s`;\n' "$name" ;;
     esac
-  done < "$SCHEMA_OBJECTS"
+  done < <(sed -n '/^v_/p' "$SCHEMA_OBJECTS" | sort; sed -n '/^v_/!p' "$SCHEMA_OBJECTS" | sort)
   exit 0
 fi
-echo restore >> "$EVENTS"
-if [[ ${FAIL_RESTORE:-0} == 1 ]]; then
-  echo 'mysql: error de restauración de prueba backup-secret' >&2
-  exit 1
-fi
-[[ $(cat) == $'SET FOREIGN_KEY_CHECKS=0;\nDROP TABLE `accounts`;\nDROP VIEW `v_accounts`;\nDROP TABLE `orphan`;\nSET FOREIGN_KEY_CHECKS=1;\nCREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;' ]]
-printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
+exit 1
 EOF
 cat > "$DEPLOY_NODE_BIN/my_print_defaults" <<'EOF'
 #!/usr/bin/env bash
@@ -142,6 +146,10 @@ echo 'PASA S9e'
 active=$(current)
 echo '{"scripts":{"migrate":"fake"}}' > "$DEPLOY_REPO_URL/package.json"
 commit migration
+echo 'MIGRATION_DATABASE_URL=mysql://migration:migration%40secret@localhost/finance_test' > "$DEPLOY_ROOT/shared/.env"
+: > "$EVENTS"
+if DEPLOY_DB_NAME=other deploy; then fail 'f: aceptó una base distinta de la que migra'; fi
+[[ ! -s "$EVENTS" ]] || fail 'f: copió o migró con una base distinta'
 : > "$EVENTS"
 if FAIL_MIGRATE=1 deploy; then fail 'f: se aceptó la migración fallida'; fi
 [[ $(current) == "$active" ]] || fail 'f: current cambió'
@@ -182,8 +190,7 @@ log=$(log_from_error "$output")
 grep -Fq 'mysqldump: error de prueba' "$log" || fail 'S14: error de mysqldump ausente'
 if grep -Fq 'backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
 
-printf '%s\n' 'export DATABASE_URL = "mysql://user:app%40secret@localhost/test"' \
-  'MIGRATION_DATABASE_URL=mysql://migration:migration%40secret@localhost/test' > "$DEPLOY_ROOT/shared/.env"
+echo 'export DATABASE_URL = "mysql://user:app%40secret@localhost/finance_test"' >> "$DEPLOY_ROOT/shared/.env"
 if output=$(FAIL_MIGRATE=1 FAIL_RESTORE=1 deploy 2>&1); then fail 'S14: se aceptó una restauración fallida'; fi
 log=$(log_from_error "$output")
 grep -Fq 'migrate: error de prueba' "$log" && grep -Fq 'mysql: error de restauración de prueba' "$log" ||
@@ -202,7 +209,7 @@ if HEALTH_BODY='{ "db": "unavailable" }' deploy --rollback --yes; then fail 'S15
   fail 'S15: rollback fallido cambió los enlaces'
 HEALTH_BODY='{ "db": "ok" }' deploy
 active=$(current)
-: > "$DEPLOY_ROOT/shared/.env"
+sed -i '/^export DATABASE_URL/d' "$DEPLOY_ROOT/shared/.env"
 HEALTH_BODY='{ "db": "not_configured" }' deploy
 [[ $(current) != "$active" ]] || fail 'S15: sin BD no se activó la release'
 rm -- "$DEPLOY_ROOT/shared/.env"
