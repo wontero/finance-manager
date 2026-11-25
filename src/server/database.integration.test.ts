@@ -1,12 +1,14 @@
-import { afterAll, beforeAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, test, vi } from "vitest";
 import {
   createConnection,
   type Connection,
   type RowDataPacket,
 } from "mysql2/promise";
 import request from "supertest";
+import express from "express";
 import { createApp } from "./app.js";
 import { readConfig } from "./config.js";
+import { createDatabase } from "./database.js";
 import { localDatabase } from "./scripts/local-database.js";
 
 let connection: Connection;
@@ -32,4 +34,30 @@ test("S5: health reports a working connection to local MariaDB", async () => {
     .get("/health")
     .expect(200);
   expect(response.body.db).toBe("ok");
+});
+
+test("S14: ten concurrent requests wait for connections in the application pool", async () => {
+  const { pool } = createDatabase(localDatabase("DATABASE_URL"));
+  const server = express();
+  const connectionIds = new Set<number>();
+  const queued = vi.fn();
+  pool.on("enqueue", queued);
+  server.get("/", async (_req, res) => {
+    const [[row]] = await pool
+      .promise()
+      .query<RowDataPacket[]>("SELECT CONNECTION_ID() AS id, SLEEP(0.1)");
+    connectionIds.add(row.id);
+    res.sendStatus(204);
+  });
+  try {
+    const responses = await Promise.allSettled(
+      Array.from({ length: 10 }, () => request(server).get("/").expect(204)),
+    );
+    for (const response of responses)
+      if (response.status === "rejected") throw response.reason;
+    expect(connectionIds.size).toBeLessThan(10);
+    expect(queued).toHaveBeenCalled();
+  } finally {
+    await pool.promise().end();
+  }
 });

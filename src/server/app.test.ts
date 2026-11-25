@@ -136,6 +136,34 @@ test("S11: concurrent health requests share a probe and cache it for 10 seconds"
   }
 });
 
+test("S14: health times out during acquisition and releases a late connection", async () => {
+  const release = vi.fn();
+  const query = vi.fn();
+  const connection = { release, query };
+  let finishAcquisition!: () => void;
+  const acquisition = new Promise<typeof connection>((resolve) => {
+    finishAcquisition = () => resolve(connection);
+  });
+  const pool = {
+    promise: () => ({ getConnection: () => acquisition }),
+  } as unknown as Parameters<typeof database.checkDatabase>[0];
+  vi.useFakeTimers();
+  try {
+    const health = database.checkDatabase(pool);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await Promise.race([health, Promise.resolve("pending")])).toBe(
+      "unavailable",
+    );
+    finishAcquisition();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(release).toHaveBeenCalledOnce();
+    expect(query).not.toHaveBeenCalled();
+  } finally {
+    finishAcquisition();
+    vi.useRealTimers();
+  }
+});
+
 test("S12: a Unix socket replaces TCP and must be an absolute path", () => {
   const DATABASE_URL = "mysql://user:secret@localhost:3308/test";
   expect(
