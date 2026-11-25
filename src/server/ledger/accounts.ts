@@ -223,6 +223,7 @@ export async function reconcile(
   write: LedgerWrite,
   input: LedgerInput<"reconcile">,
 ) {
+  await rejectLoanAccounts(write.db, [input.id]);
   const account = await currencyAccount(write.db, input.id);
   const date = input.date ?? todayLaPaz();
   const scale = await minorUnit(write.db, account.currency);

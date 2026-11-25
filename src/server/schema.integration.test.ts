@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { sql } from "kysely";
+import { Migrator } from "kysely/migration";
 import {
   createConnection,
   type Pool,
@@ -13,8 +14,12 @@ import {
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
+import { createLedger } from "./ledger/index.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
+import type { LedgerDatabase } from "./ledger/schema.js";
 import { mcpSpecs } from "./mcp/mcp-specs.js";
+import * as accountingMigration from "./migrations/202611242020_accounting_schema.js";
+import * as authenticationMigration from "./migrations/202611242230_authentication.js";
 import {
   checkLocalDataDir,
   localDatabase,
@@ -63,6 +68,9 @@ let reader: PoolConnection;
 let reportingAccount: string;
 let transaction: string;
 let initialMigration: string;
+let legacyIncomeInterest: string;
+let legacyExpenseInterest: { id: string; operationId: string | null };
+let archivedExpenseInterest: string;
 
 function connect(settingName: string, database: string) {
   const { pool } = createDatabase({ ...localDatabase(settingName), database });
@@ -105,6 +113,52 @@ beforeAll(async () => {
     }
   } finally {
     await provision.end();
+  }
+  const { db } = createDatabase({ ...migrationOptions, database: schema });
+  try {
+    const prior = new Migrator({
+      db,
+      provider: {
+        async getMigrations() {
+          return {
+            "202611242020_accounting_schema": accountingMigration,
+            "202611242230_authentication": authenticationMigration,
+          };
+        },
+      },
+    });
+    const { error } = await prior.migrateToLatest();
+    if (error) throw error;
+    const ledger = createLedger(db, "web");
+    const accounts = db.withTables<LedgerDatabase>();
+    const income = await accounts
+      .selectFrom("accounts")
+      .select("id")
+      .where("kind", "=", "income")
+      .executeTakeFirstOrThrow();
+    const archivedIncome = await ledger.createCategory({
+      name: "Intereses",
+      parentId: income.id,
+    });
+    await ledger.archiveAccount({ id: archivedIncome.id });
+    legacyIncomeInterest = archivedIncome.id;
+    const expense = await accounts
+      .selectFrom("accounts")
+      .select("id")
+      .where("kind", "=", "expense")
+      .executeTakeFirstOrThrow();
+    const archived = await ledger.createCategory({
+      name: "Intereses",
+      parentId: expense.id,
+    });
+    await ledger.archiveAccount({ id: archived.id });
+    archivedExpenseInterest = archived.id;
+    legacyExpenseInterest = await ledger.createCategory({
+      name: "intereses",
+      parentId: expense.id,
+    });
+  } finally {
+    await db.destroy();
   }
   initialMigration = migrate();
   migration = await connect("MIGRATION_DATABASE_URL", schema);
@@ -167,7 +221,7 @@ test("S2: seeds exactly the currencies and system accounts", async () => {
     { code: "USD", minor_unit: 2 },
   ]);
   const [accounts] = await migration.query<RowDataPacket[]>(
-    "SELECT name, kind, parent_id, currency, is_system FROM accounts WHERE is_system ORDER BY name",
+    "SELECT name, kind, parent_id, currency, is_system FROM accounts WHERE is_system AND parent_id IS NULL ORDER BY name",
   );
   expect(accounts).toEqual(
     [
@@ -184,6 +238,44 @@ test("S2: seeds exactly the currencies and system accounts", async () => {
       is_system: 1,
     })),
   );
+});
+
+test("M-008B S13: la migración conserva el ID de la categoría activa o recupera la archivada", async () => {
+  const [interest] = await migration.query<RowDataPacket[]>(
+    "SELECT id, name, is_system, archived_at FROM accounts WHERE name = 'Intereses' ORDER BY id",
+  );
+  expect(interest).toEqual([
+    {
+      id: legacyIncomeInterest,
+      name: "Intereses",
+      is_system: 1,
+      archived_at: null,
+    },
+    {
+      id: archivedExpenseInterest,
+      name: "Intereses",
+      is_system: 0,
+      archived_at: expect.any(String),
+    },
+    {
+      id: legacyExpenseInterest.id,
+      name: "Intereses",
+      is_system: 1,
+      archived_at: null,
+    },
+  ]);
+  const { db } = createDatabase({
+    ...localDatabase("DATABASE_URL"),
+    database: schema,
+  });
+  try {
+    const ledger = createLedger(db, "web");
+    await expect(
+      ledger.undoOperation(legacyExpenseInterest.operationId!),
+    ).rejects.toThrow(/No se puede deshacer.*accounts\//i);
+  } finally {
+    await db.destroy();
+  }
 });
 
 test("S3: audit_log permits inserts and rejects updates and deletes", async () => {

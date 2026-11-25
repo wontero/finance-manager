@@ -8,7 +8,7 @@ import {
   type LedgerInput,
 } from "@finance-manager/core";
 import { sql, type Kysely } from "kysely";
-import { createAccount, createCategory } from "./accounts.js";
+import { createAccount } from "./accounts.js";
 import { utcStamp, type LedgerWrite } from "./audit.js";
 import { systemAccounts, type LedgerDatabase, type Loan } from "./schema.js";
 import {
@@ -147,19 +147,17 @@ async function findLoan(db: Database, id: string) {
   return loan;
 }
 
-async function interestCategory(write: LedgerWrite, given: boolean) {
-  const parentId = await systemAccount(
-    write.db,
-    given ? systemAccounts.income : systemAccounts.expense,
-  );
-  const name = "Intereses";
-  const existing = await write.db
+async function interestCategory(db: Database, kind: "income" | "expense") {
+  const category = await db
     .selectFrom("accounts")
     .select("id")
-    .where("active_parent_id", "=", parentId)
-    .where("name", "=", name)
+    .where("loan_interest", "=", kind)
     .executeTakeFirst();
-  return existing?.id ?? (await createCategory(write, { name, parentId })).id;
+  if (!category)
+    throw new Error(
+      `Falta la categoría de sistema de intereses de ${kind === "income" ? "ingresos" : "gastos"}.`,
+    );
+  return category.id;
 }
 
 export async function payLoan(
@@ -192,7 +190,7 @@ export async function payLoan(
     lines.push({ accountId: loan.account_id, amount: -split.principal * sign });
   if (split.interest !== 0n)
     lines.push({
-      accountId: await interestCategory(write, given),
+      accountId: await interestCategory(write.db, given ? "income" : "expense"),
       amount: -split.interest * sign,
     });
   const entry = await recordBalancedEntry(

@@ -17,6 +17,7 @@ export type LedgerDatabase = {
     currency: Generated<string | null>;
     custom: Generated<string | null>;
     is_system: Generated<number>;
+    loan_interest: Generated<"income" | "expense" | null>;
     archived_at: Generated<string | null>;
     created_at: Generated<string>;
     updated_at: Generated<string>;

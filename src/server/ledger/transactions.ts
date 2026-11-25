@@ -92,6 +92,7 @@ function validatePostingAccount(account: Account, currency: string) {
   requireActive(account);
   if (
     account.is_system &&
+    account.loan_interest === null &&
     (account.kind === "income" || account.kind === "expense")
   )
     throw new Error(
@@ -244,7 +245,6 @@ export async function recordAdjustment(
   offsetName: string,
   entry: { date: string; description: string },
 ) {
-  await rejectLoanAccounts(write.db, [account.id]);
   const offset = await systemAccount(write.db, offsetName);
   const signed = account.kind === "liability" ? -amount : amount;
   return recordBalancedEntry(write, entry, account.currency, [
