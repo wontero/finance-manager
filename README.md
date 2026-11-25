@@ -65,7 +65,7 @@ Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
-- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
+- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso, los servicios contables y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
 - `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
 
@@ -75,8 +75,9 @@ La guía cubre la preparación de cPanel, el primer despliegue con Passenger, el
 
 ## Estructura del repositorio
 
-- `src/core/` contiene el código compartido.
+- `src/core/` contiene las validaciones y reglas contables puras, además del código compartido.
 - `src/server/` contiene la app HTTP, su punto de entrada y los scripts de MariaDB local.
+- `src/server/ledger/` contiene los servicios contables que escriben en MariaDB y registran la bitácora.
 - `src/deploy/` contiene el script de despliegue y sus pruebas en Bash.
 - `src/web/` contiene la aplicación React y la configuración de shadcn/ui.
 - `src/scripts/` contiene la comprobación de versión de Node para las pruebas.

@@ -4,6 +4,9 @@
 
 ## Componentes y responsabilidades
 
+- `src/core` contiene los esquemas Zod de las entradas y las reglas puras de dinero, fecha, cuadre y conversión.
+- `src/server/ledger` ofrece la API de servicios TypeScript mediante `createLedger(db, actor)`. Usa Kysely para aplicar esas reglas a las cuentas, asientos, catálogos y consultas.
+
 ## Stack tecnológico
 
 - Node.js 22 y TypeScript estricto con npm workspaces.
@@ -16,9 +19,23 @@
 
 `accounts` guarda el árbol de cuentas y categorías. Las categorías son cuentas de ingreso y gasto. Una cuenta de activo o pasivo tiene moneda fija, mientras que las de ingreso, gasto y patrimonio admiten líneas en varias monedas. Los activos pueden ser `banco`, `efectivo`, `ahorro`, `inversion` o `por_cobrar`. Los pasivos pueden ser `tarjeta_credito` o `prestamo_recibido`. `currencies` define las unidades mínimas. Solo se exige un nombre único entre hermanos activos, incluidas las raíces.
 
-`transactions` guarda el asiento y su fecha contable sin hora. Las marcas de tiempo usan `DATETIME(3)`. Sus valores por defecto se calculan en la zona de la sesión, que la app y el migrador fijan en UTC. Antes de escribir desde phpMyAdmin o la consola, ejecuta `SET SESSION time_zone = '+00:00';` en esa conexión. `postings` registra las líneas con signo en unidades mínimas. El dominio comprobará que cada asiento cuadra por moneda y usará la cuenta de patrimonio Cambio de moneda para transferencias entre monedas. `exchange_rates` guarda tipos entre monedas distintas por fecha, par y fuente. Una unidad de `from_currency` equivale a `rate` unidades de `to_currency`. El driver devuelve `BIGINT` y `DECIMAL(24,10)` como cadenas. Para operar con unidades mínimas se convierte explícitamente con `BigInt(valor)`. El tipo de cambio se conserva como cadena decimal para operaciones exactas posteriores.
+`transactions` guarda el asiento y su fecha contable sin hora. La fecha contable por defecto es la de America/La_Paz. Las marcas de tiempo usan `DATETIME(3)`. Sus valores por defecto se calculan en la zona de la sesión, que la app y el migrador fijan en UTC. Antes de escribir desde phpMyAdmin o la consola, ejecuta `SET SESSION time_zone = '+00:00';` en esa conexión.
 
-`transaction_tags` relaciona asientos y etiquetas. `custom_field_definitions` define los campos almacenados como JSON en cuentas y asientos. `operations` agrupa los cambios y permite un único deshacer directo por operación. Usa `ORDER BY seq` para obtener el orden de asignación del autoincremento, incluso dentro del mismo milisegundo. Puede haber saltos y el orden de confirmación de transacciones concurrentes puede diferir. `audit_log` conserva el antes y el después de cada cambio, con un índice por tabla e ID de fila. Los triggers rechazan `UPDATE` y `DELETE` de la bitácora. La cuenta administrativa de migración conserva los permisos DDL necesarios para restaurar el esquema.
+`postings` registra las líneas en unidades mínimas. Débito es positivo y crédito es negativo. El saldo natural de activo y gasto es la suma de las líneas. El saldo natural de pasivo, ingreso y patrimonio invierte el signo. Cada asiento requiere al menos dos líneas, todas con importe distinto de cero y con suma cero por moneda. Una cuenta de activo o pasivo solo admite líneas en su moneda. Las transferencias multimoneda guardan los dos importes reales y dos contrapartidas en Cambio de moneda. El borrado lógico excluye el asiento de los saldos.
+
+La API recibe importes de línea positivos en cadena decimal o boliviana. La coma identifica la fracción del formato boliviano cuando se usan puntos de millares. Se rechazan los importes con más decimales que los de la moneda. Saldos, acumulados y conversiones se calculan con `bigint`. La conciliación compara el saldo natural al cierre de la fecha contable con el saldo real indicado y registra la diferencia. Al archivar una cuenta de activo o pasivo se consideran todos los asientos vigentes, incluidos los fechados en el futuro.
+
+`exchange_rates` guarda tipos entre monedas distintas por fecha, par y fuente. Una unidad de `from_currency` equivale a `rate` unidades de `to_currency`. La valuación usa el último tipo del par directo hasta la fecha solicitada. Ante varias fuentes el mismo día, primero se elige el nombre exacto `BCB referencial venta` y luego la primera fuente en el orden de `utf8mb4_unicode_ci`. Se usa aritmética entera a escala 10¹⁰ y se redondea a la unidad mínima de destino, mitad lejos de cero. El patrimonio convierte cada saldo distinto de cero a BOB e informa las cuentas cuyo saldo no pudo valuar. La conversión se realiza en la consulta y no genera asientos.
+
+`transaction_tags` relaciona asientos y etiquetas. Los nombres se comparan con la colación de la tabla para compartir etiquetas como `Viaje` y `viaje`. `custom_field_definitions` define los campos almacenados como JSON en cuentas y asientos. Las altas y los cambios de `custom` validan todas las claves contra las definiciones activas. El lote de importación compara asientos vigentes de la misma fecha por las líneas `(cuenta, moneda, importe)`, sin importar su orden y conservando repeticiones.
+
+## Operaciones y deshacer
+
+Cada escritura del servicio usa una transacción que bloquea la raíz Ingresos para serializar las decisiones que abarcan varias filas. El módulo de escritura crea una sola fila en `operations` y una en `audit_log` por cada fila de dominio modificada. Las llamadas sin cambios, como conciliar un saldo igual, no crean una operación. La lista de operaciones se ordena por `seq` descendente. El correlativo puede tener saltos.
+
+La bitácora conserva cada fila completa antes y después del cambio, salvo `active_parent_id`, que MariaDB calcula. `BIGINT`, `DECIMAL(24,10)` y las columnas JSON llegan como cadenas desde el driver. Guardar el texto original de las columnas JSON preserva la representación exacta al restaurarlas. Los triggers impiden modificar o borrar entradas de la bitácora. La cuenta de migración conserva los permisos DDL necesarios para restaurar el esquema.
+
+Deshacer bloquea la operación objetivo, verifica el estado actual de las filas contra el `after` registrado y aplica el inverso en orden descendente de bitácora. La comparación ignora `updated_at`. Los cambios posteriores vigentes y los conflictos de integridad bloquean la reversión. Cada operación admite un único deshacer directo. Deshacer esa reversión rehace el cambio. La lista informa el estado efectivo de una operación según la paridad de su cadena de reversiones.
 
 ## Consultas y migraciones
 
