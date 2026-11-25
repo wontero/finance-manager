@@ -784,7 +784,11 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
       ),
     ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
   } finally {
-    await rm(fixture, { recursive: true, force: true });
+    try {
+      await migration.query("DROP TRIGGER IF EXISTS restore_fixture_trigger");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
   }
 }, 30_000);
 

@@ -217,14 +217,18 @@ export function ledgerSpecs(
     });
 
     test("S7: open assets and liabilities with the correct natural balance", async () => {
-      for (const [kind, subtype, amount, balance, offset] of [
-        ["asset", "banco", "500,00", 50000n, "-50000"],
-        ["liability", "tarjeta_credito", "300,00", 30000n, "30000"],
+      for (const [classification, amount, balance, offset] of [
+        [{ kind: "asset", subtype: "banco" }, "500,00", 50000n, "-50000"],
+        [
+          { kind: "liability", subtype: "tarjeta_credito" },
+          "300,00",
+          30000n,
+          "30000",
+        ],
       ] as const) {
         const result = await ledger.createAccount({
           name: name("Apertura"),
-          kind,
-          subtype,
+          ...classification,
           currency: "BOB",
           opening: { amount, date },
         });
@@ -346,7 +350,7 @@ export function ledgerSpecs(
       });
       const lines = await postings(result.id);
       expect(lines.map((line) => line.amount)).toEqual(["-2500", "2500"]);
-      const log = await audit(edit.operationId);
+      const log = await audit(edit.operationId!);
       expect(log).toContainEqual(
         expect.objectContaining({
           table_name: "transactions",
@@ -418,7 +422,7 @@ export function ledgerSpecs(
           action: "update",
         }),
       ]);
-      await ledger.undoOperation({ id: edit.operationId });
+      await ledger.undoOperation({ id: edit.operationId! });
       expect(withoutUpdatedAt(await transactions(created.id))).toEqual(
         withoutUpdatedAt(original),
       );
@@ -452,13 +456,13 @@ export function ledgerSpecs(
         ledger.undoOperation({ id: created.operationId }),
       ).rejects.toThrow(edit.operationId);
       const { operationId } = await ledger.undoOperation({
-        id: edit.operationId,
+        id: edit.operationId!,
       });
       expect(withoutUpdatedAt(await transactions(created.id))).toEqual(
         withoutUpdatedAt(original),
       );
       await expect(
-        ledger.undoOperation({ id: edit.operationId }),
+        ledger.undoOperation({ id: edit.operationId! }),
       ).rejects.toThrow(/deshecha/i);
       await ledger.undoOperation({ id: operationId });
       expect((await transactions(created.id))[0].note).toBe("Cambio posterior");
@@ -484,6 +488,38 @@ export function ledgerSpecs(
           undone: false,
         }),
       ]);
+    });
+
+    test("S13: a later independent edit still blocks undo if it put the old value back", async () => {
+      const created = await expense();
+      await ledger.editTransaction({ id: created.id, note: "Corrección" });
+      const later = await ledger.editTransaction({
+        id: created.id,
+        note: null,
+      });
+      const before = await counts();
+      await expect(
+        ledger.undoOperation({ id: created.operationId }),
+      ).rejects.toThrow(later.operationId!);
+      expect(await counts()).toEqual(before);
+    });
+
+    test("S9/S13: undo cannot create an account cycle through a later move", async () => {
+      const initialParent = await category();
+      const child = await category(initialParent);
+      const move = await ledger.moveAccount({ id: child, parentId: expenses });
+      const later = await ledger.moveAccount({
+        id: initialParent,
+        parentId: child,
+      });
+      const before = await counts();
+      await expect(
+        ledger.undoOperation({ id: move.operationId }),
+      ).rejects.toThrow(later.operationId);
+      expect(await counts()).toEqual(before);
+      expect(
+        await rows("SELECT parent_id FROM accounts WHERE id = ?", [child]),
+      ).toEqual([{ parent_id: expenses }]);
     });
 
     test("S14: import one atomic batch with optional duplicate skipping and undo", async () => {
@@ -673,13 +709,14 @@ export function ledgerSpecs(
         type: "text",
       });
       await ledger.archiveCustomField({ id: archived.id });
-      for (const custom of [
+      const invalidValues: Record<string, string | number>[] = [
         { medio: "otro" },
         { puntos: "3" },
         { fecha: "2026-02-30" },
         { desconocida: "x" },
         { anterior: "x" },
-      ])
+      ];
+      for (const custom of invalidValues)
         await expect(
           ledger.createTransaction({ ...draft(), custom }),
         ).rejects.toThrow();
@@ -697,7 +734,9 @@ export function ledgerSpecs(
         custom,
       );
       expect(
-        JSON.parse((await audit(first.operationId))[0].after).custom,
+        JSON.parse(
+          JSON.parse((await audit(first.operationId))[0].after).custom,
+        ),
       ).toEqual(custom);
       const links = await rows(
         "SELECT tag_id FROM transaction_tags WHERE transaction_id IN (?, ?) ORDER BY transaction_id",
@@ -712,6 +751,24 @@ export function ledgerSpecs(
       await expect(
         ledger.editTransaction({ id: first.id, custom }),
       ).rejects.toThrow();
+      await ledger.defineCustomField({
+        entity: "account",
+        key: "alias",
+        label: "Alias",
+        type: "text",
+      });
+      await expect(
+        ledger.setAccountCustom({ id: cash, custom: { alias: 1 } }),
+      ).rejects.toThrow();
+      const change = await ledger.setAccountCustom({
+        id: cash,
+        custom: { alias: "Billetera" },
+      });
+      expect(
+        JSON.parse(
+          JSON.parse((await audit(change.operationId))[0].after).custom,
+        ),
+      ).toEqual({ alias: "Billetera" });
     });
 
     test("S19: a real mid-write audit failure rolls back domain rows and the operation", async () => {

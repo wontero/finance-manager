@@ -5,6 +5,6 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["*.ts", "migrations/*.ts"],
-  "exclude": ["*.test.ts"]
+  "include": ["*.ts", "migrations/*.ts", "ledger/*.ts"],
+  "exclude": ["*.test.ts", "ledger/ledger-specs.ts"]
 }
