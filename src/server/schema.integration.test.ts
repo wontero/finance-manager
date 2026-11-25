@@ -14,6 +14,7 @@ import { afterAll, beforeAll, expect, test } from "vitest";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
+import { mcpSpecs } from "./mcp/mcp-specs.js";
 import {
   checkLocalDataDir,
   localDatabase,
@@ -801,3 +802,4 @@ test("S20: the deploy backup restores data, views, foreign keys, virtual columns
 
 ledgerSpecs(() => ({ migration, reader }));
 authSpecs(() => ({ app, reader }));
+mcpSpecs(() => migration, schema, readOnlySchema);

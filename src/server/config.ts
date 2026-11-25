@@ -108,6 +108,7 @@ const configSchema = z.object({
     .pipe(z.number().int(portError).min(1, portError).max(65535, portError))
     .default(3000),
   DATABASE_URL: databaseUrl("DATABASE_URL").optional(),
+  READONLY_DATABASE_URL: databaseUrl("READONLY_DATABASE_URL").optional(),
   DATABASE_SOCKET: socketSchema,
   WEB_DIST_DIR: z
     .string()
@@ -144,7 +145,22 @@ function connectionOptions(
 
 export function readConfig(env: NodeJS.ProcessEnv) {
   const config = parseConfig(configSchema, env);
-  const { DATABASE_URL: database, DATABASE_SOCKET: socketPath } = config;
+  const {
+    DATABASE_URL: database,
+    READONLY_DATABASE_URL: readonly,
+    DATABASE_SOCKET: socketPath,
+  } = config;
+  if (
+    readonly &&
+    (!readonly.credentials.user ||
+      !readonly.credentials.database ||
+      readonly.credentials.user === database?.credentials.user ||
+      readonly.credentials.database.toLowerCase() ===
+        database?.credentials.database?.toLowerCase())
+  )
+    throw new Error(
+      "READONLY_DATABASE_URL requiere un usuario lector y una base distintos de los principales.",
+    );
   const issuer = new URL(
     config.PUBLIC_URL ?? `http://localhost:${config.PORT}`,
   );
@@ -162,6 +178,7 @@ export function readConfig(env: NodeJS.ProcessEnv) {
   return {
     port: config.PORT,
     database: database && connectionOptions(database, socketPath),
+    readonlyDatabase: readonly && connectionOptions(readonly, socketPath),
     webDistDir: resolve(config.WEB_DIST_DIR),
     version: config.APP_VERSION,
     auth: {

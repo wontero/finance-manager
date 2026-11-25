@@ -317,9 +317,11 @@ export function authSpecs(
         version,
       });
       const tools = await mcp(body.access_token, "tools/list").expect(200);
-      expect(tools.body.result.tools).toMatchObject([
-        { name: "ping", annotations: { readOnlyHint: true } },
-      ]);
+      expect(
+        tools.body.result.tools.find(
+          (tool: { name: string }) => tool.name === "ping",
+        ),
+      ).toMatchObject({ annotations: { readOnlyHint: true } });
       const pong = await ping(body.access_token).expect(200);
       const [content] = pong.body.result.content;
       expect(content.type).toBe("text");
