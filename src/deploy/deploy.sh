@@ -67,12 +67,15 @@ if [[ $mode == --rollback ]]; then
   fi
 fi
 
-[[ -r $shared/.env ]] || fail 'Prepara shared/.env antes de desplegar.'
-require_db=$(node -e '
-  const { readFileSync } = require("node:fs");
-  const { parseEnv } = require("node:util");
-  console.log(Object.hasOwn(parseEnv(readFileSync(process.argv[1], "utf8")), "DATABASE_URL"));
-' "$shared/.env" 2>/dev/null) || fail 'No se pudo leer shared/.env con Node.js.'
+require_db=false
+if [[ $mode != --rollback || -e $shared/.env ]]; then
+  [[ -r $shared/.env ]] || fail 'Prepara shared/.env antes de desplegar.'
+  require_db=$(node -e '
+    const { readFileSync } = require("node:fs");
+    const { parseEnv } = require("node:util");
+    console.log(Object.hasOwn(parseEnv(readFileSync(process.argv[1], "utf8")), "DATABASE_URL"));
+  ' "$shared/.env" 2>/dev/null) || fail 'No se pudo leer shared/.env con Node.js.'
+fi
 
 replace_link() {
   ln -sfnT -- "$1" "$2.next" && mv -Tf -- "$2.next" "$2"

@@ -183,6 +183,10 @@ active=$(current)
 : > "$DEPLOY_ROOT/shared/.env"
 HEALTH_BODY='{ "db": "not_configured" }' deploy
 [[ $(current) != "$active" ]] || fail 'S15: sin BD no se activó la release'
+rm -- "$DEPLOY_ROOT/shared/.env"
+HEALTH_BODY='{ "db": "not_configured" }' deploy --rollback --yes
+[[ $(current) == "$active" ]] || fail 'S15: sin .env no se activó previous'
+touch "$DEPLOY_ROOT/shared/.env"
 echo 'PASA S15'
 
 snapshot() {
