@@ -20,13 +20,16 @@ export async function up(db: Kysely<unknown>) {
       currency ${currencyCode},
       custom JSON,
       is_system BOOLEAN NOT NULL DEFAULT FALSE,
-      archived_at TIMESTAMP NULL DEFAULT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      archived_at DATETIME(3) NULL DEFAULT NULL,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
       active_parent_id BIGINT UNSIGNED AS (IF(archived_at IS NULL, COALESCE(parent_id, 0), NULL)) VIRTUAL,
       CONSTRAINT accounts_active_sibling_name UNIQUE (active_parent_id, name),
       CONSTRAINT accounts_classification CHECK (
-        (kind IN ('asset', 'liability') AND currency IS NOT NULL AND subtype IS NOT NULL)
+        (currency IS NOT NULL AND subtype IS NOT NULL AND (
+          (kind = 'asset' AND subtype IN ('banco', 'efectivo', 'ahorro', 'inversion', 'por_cobrar'))
+          OR (kind = 'liability' AND subtype IN ('tarjeta_credito', 'prestamo_recibido'))
+        ))
         OR (kind IN ('income', 'expense', 'equity') AND currency IS NULL AND subtype IS NULL)
       ),
       FOREIGN KEY (parent_id) REFERENCES accounts(id),
@@ -34,10 +37,11 @@ export async function up(db: Kysely<unknown>) {
     ) ${options}`,
     sql`CREATE TABLE operations (
       id ${operationId} PRIMARY KEY,
+      seq BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE,
       actor ENUM('claude', 'web', 'system') NOT NULL,
       description VARCHAR(255) NOT NULL,
-      undoes_operation_id ${operationId},
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      undoes_operation_id ${operationId} UNIQUE,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       FOREIGN KEY (undoes_operation_id) REFERENCES operations(id)
     ) ${options}`,
     sql`CREATE TABLE transactions (
@@ -47,9 +51,9 @@ export async function up(db: Kysely<unknown>) {
       note TEXT,
       custom JSON,
       operation_id ${operationId} NOT NULL,
-      deleted_at TIMESTAMP NULL DEFAULT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      deleted_at DATETIME(3) NULL DEFAULT NULL,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
       INDEX transactions_date_idx (date),
       FOREIGN KEY (operation_id) REFERENCES operations(id)
     ) ${options}`,
@@ -83,7 +87,7 @@ export async function up(db: Kysely<unknown>) {
       label VARCHAR(120) NOT NULL,
       type ENUM('text', 'number', 'date', 'option') NOT NULL,
       options JSON,
-      archived_at TIMESTAMP NULL DEFAULT NULL,
+      archived_at DATETIME(3) NULL DEFAULT NULL,
       UNIQUE (entity, \`key\`)
     ) ${options}`,
     sql`CREATE TABLE exchange_rates (
@@ -93,6 +97,7 @@ export async function up(db: Kysely<unknown>) {
       rate DECIMAL(24, 10) NOT NULL,
       source VARCHAR(160) NOT NULL,
       CONSTRAINT exchange_rates_positive CHECK (rate > 0),
+      CONSTRAINT exchange_rates_distinct_currency CHECK (from_currency <> to_currency),
       PRIMARY KEY (from_currency, to_currency, date, source),
       FOREIGN KEY (from_currency) REFERENCES currencies(code),
       FOREIGN KEY (to_currency) REFERENCES currencies(code)
@@ -105,7 +110,8 @@ export async function up(db: Kysely<unknown>) {
       action ENUM('insert', 'update', 'delete') NOT NULL,
       \`before\` JSON,
       \`after\` JSON,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      INDEX audit_log_row_idx (table_name, row_id),
       FOREIGN KEY (operation_id) REFERENCES operations(id)
     ) ${options}`,
     sql`CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log FOR EACH ROW

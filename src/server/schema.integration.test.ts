@@ -1,14 +1,22 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { sql } from "kysely";
 import {
   createConnection,
-  type Connection,
+  type Pool,
+  type PoolConnection,
   type RowDataPacket,
 } from "mysql2/promise";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { createDatabase } from "./database.js";
-import { localDatabase, setting } from "./scripts/local-database.js";
+import {
+  checkLocalDataDir,
+  localDatabase,
+  setting,
+} from "./scripts/local-database.js";
 
 const schema = "finance_test";
 const readOnlySchema = "finance_test_ro";
@@ -32,16 +40,25 @@ const views = [
   "v_exchange_rates",
   "v_postings",
   "v_tags",
+  "v_transaction_tags",
   "v_transactions",
 ];
 const permissionDenied = { code: "ER_TABLEACCESS_DENIED_ERROR" };
 const uuid = randomUUID();
-let migration: Connection;
-let app: Connection;
-let reader: Connection;
+const pools: Pool[] = [];
+let migration: PoolConnection;
+let app: PoolConnection;
+let reader: PoolConnection;
 let reportingAccount: string;
 let transaction: string;
-let operationCreated = false;
+let initialMigration: string;
+
+function connect(settingName: string, database: string) {
+  const { pool } = createDatabase({ ...localDatabase(settingName), database });
+  const client = pool.promise();
+  pools.push(client);
+  return client.getConnection();
+}
 
 function migrate() {
   const url = new URL(setting("MIGRATION_DATABASE_URL"));
@@ -63,27 +80,25 @@ function migrate() {
 
 beforeAll(async () => {
   const migrationOptions = localDatabase("MIGRATION_DATABASE_URL");
-  migration = await createConnection({
+  const provision = await createConnection({
     ...migrationOptions,
-    database: schema,
-    supportBigNumbers: true,
-    bigNumberStrings: true,
+    database: undefined,
   });
-  const [existing] = await migration.query<RowDataPacket[]>(
-    "SHOW TABLES LIKE 'currencies'",
-  );
-  const output = migrate();
-  expect(output).toMatch(
-    existing.length ? /Sin migraciones pendientes/ : /Migración aplicada:/,
-  );
-  app = await createConnection({
-    ...localDatabase("DATABASE_URL"),
-    database: schema,
-  });
-  reader = await createConnection({
-    ...localDatabase("READONLY_DATABASE_URL"),
-    database: readOnlySchema,
-  });
+  try {
+    await checkLocalDataDir(provision, migrationOptions.port);
+    for (const database of [readOnlySchema, schema]) {
+      await provision.query(`DROP DATABASE IF EXISTS \`${database}\``);
+      await provision.query(
+        `CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+      );
+    }
+  } finally {
+    await provision.end();
+  }
+  initialMigration = migrate();
+  migration = await connect("MIGRATION_DATABASE_URL", schema);
+  app = await connect("DATABASE_URL", schema);
+  reader = await connect("READONLY_DATABASE_URL", readOnlySchema);
   const [accounts] = await migration.query<RowDataPacket[]>(
     "SELECT id FROM accounts WHERE name = 'Saldos iniciales'",
   );
@@ -92,7 +107,6 @@ beforeAll(async () => {
     "INSERT INTO operations (id, actor, description) VALUES (?, 'system', 'Prueba M-003')",
     [uuid],
   );
-  operationCreated = true;
   await migration.execute(
     "INSERT INTO transactions (date, description, operation_id) VALUES ('2026-11-24', 'Prueba M-003', ?)",
     [uuid],
@@ -105,26 +119,14 @@ beforeAll(async () => {
 }, 20_000);
 
 afterAll(async () => {
-  await reader?.end();
-  await app?.end();
-  if (!migration) return;
-  try {
-    if (transaction) {
-      await migration.execute("DELETE FROM postings WHERE transaction_id = ?", [
-        transaction,
-      ]);
-      await migration.execute("DELETE FROM transactions WHERE id = ?", [
-        transaction,
-      ]);
-    }
-    if (operationCreated)
-      await migration.execute("DELETE FROM operations WHERE id = ?", [uuid]);
-  } finally {
-    await migration.end();
-  }
+  reader?.release();
+  app?.release();
+  migration?.release();
+  await Promise.all(pools.map((pool) => pool.end()));
 });
 
 test("S1: migrate creates the schema and is idempotent", async () => {
+  expect(initialMigration).toMatch(/Migración aplicada:/);
   expect(migrate()).toMatch(/Sin migraciones pendientes/);
   const [objects] = await migration.execute<RowDataPacket[]>(
     "SELECT table_name AS name, table_type AS kind FROM information_schema.tables WHERE table_schema IN (?, ?)",
@@ -137,7 +139,7 @@ test("S1: migrate creates the schema and is idempotent", async () => {
       .sort(),
   ).toEqual(tables);
   const [definitions] = await migration.execute<RowDataPacket[]>(
-    "SELECT table_name AS name, security_type AS security FROM information_schema.views WHERE table_schema = ? ORDER BY table_name",
+    "SELECT table_name AS name, security_type AS security FROM information_schema.views WHERE table_schema = ? ORDER BY BINARY table_name",
     [readOnlySchema],
   );
   expect(definitions).toEqual(
@@ -296,7 +298,6 @@ test("S7: the reader can select only from the views and cannot write or create",
     await expect(
       reader.query(`SELECT * FROM finance_test.${table}`),
     ).rejects.toMatchObject(permissionDenied);
-  // Use valid DML on an updatable view to isolate the privilege check.
   for (const statement of [
     "INSERT INTO v_tags (name) VALUES ('M-003')",
     "UPDATE v_tags SET name = 'M-003'",
@@ -381,7 +382,7 @@ test("S10: the app cannot create or drop tables or access the reader schema", as
     await expect(app.query(statement)).rejects.toMatchObject(permissionDenied);
 });
 
-test("S12: the migration user can create and drop in finance_test but cannot read mysql", async () => {
+test("the migration user can create and drop in finance_test but cannot read mysql", async () => {
   const table = `m001_${uuid.replaceAll("-", "")}`;
   await migration.query(`CREATE TABLE ${table} (id INT PRIMARY KEY)`);
   try {
@@ -392,3 +393,316 @@ test("S12: the migration user can create and drop in finance_test but cannot rea
     await migration.query(`DROP TABLE ${table}`);
   }
 });
+
+test("S13: each pooled connection applies strict SQL mode and UTC", async () => {
+  const { pool, db } = createDatabase({
+    ...localDatabase("DATABASE_URL"),
+    database: schema,
+  });
+  try {
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        db.connection().execute(async (connection) => {
+          const { rows } = await sql<{
+            tz: string;
+            mode: string;
+          }>`SELECT @@session.time_zone AS tz, @@session.sql_mode AS mode`.execute(
+            connection,
+          );
+          expect(rows[0].tz).toBe("+00:00");
+          expect(rows[0].mode.split(",").sort()).toEqual([
+            "ERROR_FOR_DIVISION_BY_ZERO",
+            "NO_ENGINE_SUBSTITUTION",
+            "STRICT_ALL_TABLES",
+          ]);
+        }),
+      ),
+    );
+    await expect(
+      pool
+        .promise()
+        .execute(
+          "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
+          [transaction, reportingAccount, "9223372036854775808"],
+        ),
+    ).rejects.toMatchObject({ errno: 1264 });
+    await expect(
+      sql`INSERT INTO operations (id, actor, description)
+        VALUES (${randomUUID()}, 'invalid', 'Prueba S13')`.execute(db),
+    ).rejects.toMatchObject({ errno: 1265 });
+    for (const client of [reader, migration]) {
+      const [rows] = await client.query("SELECT @@session.time_zone AS tz");
+      expect(rows).toEqual([{ tz: "+00:00" }]);
+    }
+  } finally {
+    await db.destroy();
+  }
+});
+
+test("S15: each subtype is accepted only for its account kind", async () => {
+  const insert =
+    "INSERT INTO accounts (name, kind, subtype, currency) VALUES (?, ?, ?, 'BOB')";
+  await app.beginTransaction();
+  try {
+    for (const [kind, subtype] of [
+      ["asset", "banco"],
+      ["asset", "efectivo"],
+      ["asset", "ahorro"],
+      ["asset", "inversion"],
+      ["asset", "por_cobrar"],
+      ["liability", "tarjeta_credito"],
+      ["liability", "prestamo_recibido"],
+    ]) {
+      await app.execute(insert, [subtype, kind, subtype]);
+    }
+    for (const [kind, subtype] of [
+      ["asset", "tarjeta_credito"],
+      ["liability", "banco"],
+      ["asset", null],
+    ]) {
+      await expect(
+        app.execute(insert, [randomUUID(), kind, subtype]),
+      ).rejects.toMatchObject({ errno: 4025 });
+    }
+  } finally {
+    await app.rollback();
+  }
+});
+
+test("S16: operations in the same millisecond have insertion order and a single undo", async () => {
+  const first = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  const second = "00000000-0000-0000-0000-000000000001";
+  const insert =
+    "INSERT INTO operations (id, actor, description, undoes_operation_id, created_at) VALUES (?, 'web', 'Prueba S16', ?, '2026-11-24 12:34:56.123')";
+  await app.beginTransaction();
+  try {
+    await app.execute(insert, [first, null]);
+    await app.execute(insert, [second, first]);
+    const [rows] = await app.execute(
+      "SELECT id FROM operations WHERE id IN (?, ?) ORDER BY seq",
+      [first, second],
+    );
+    expect(rows).toEqual([{ id: first }, { id: second }]);
+    await expect(
+      app.execute(insert, [randomUUID(), first]),
+    ).rejects.toMatchObject({ code: "ER_DUP_ENTRY" });
+  } finally {
+    await app.rollback();
+  }
+});
+
+test("S17: same-currency rates are rejected and timestamps accept 2040 with milliseconds", async () => {
+  await expect(
+    app.execute(
+      "INSERT INTO exchange_rates (date, from_currency, to_currency, rate, source) VALUES ('2040-01-01', 'BOB', 'BOB', 1, 'Prueba S17')",
+    ),
+  ).rejects.toMatchObject({ errno: 4025 });
+  await app.beginTransaction();
+  try {
+    await app.execute(
+      "UPDATE transactions SET created_at = '2040-01-01 00:00:00.123' WHERE id = ?",
+      [transaction],
+    );
+    const [rows] = await app.execute(
+      "SELECT CAST(created_at AS CHAR) AS created_at FROM transactions WHERE id = ?",
+      [transaction],
+    );
+    expect(rows).toEqual([{ created_at: "2040-01-01 00:00:00.123" }]);
+    const [timestamps] = await app.query<RowDataPacket[]>(
+      "SELECT data_type, datetime_precision FROM information_schema.columns WHERE table_schema = DATABASE() AND column_name IN ('created_at', 'updated_at', 'archived_at', 'deleted_at')",
+    );
+    expect(timestamps.length).toBeGreaterThan(0);
+    expect(
+      timestamps.every(
+        (row) =>
+          row.data_type === "datetime" && Number(row.datetime_precision) === 3,
+      ),
+    ).toBe(true);
+    const [index] = await app.query<RowDataPacket[]>(
+      "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index) AS columns_in_index FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_log' GROUP BY index_name",
+    );
+    expect(index).toContainEqual({ columns_in_index: "table_name,row_id" });
+  } finally {
+    await app.rollback();
+  }
+});
+
+test("S18: reporting shows archived accounts, posting details and active transaction tags", async () => {
+  await migration.query("CREATE VIEW finance_test_ro.v_obsoleta AS SELECT 1");
+  expect(migrate()).toMatch(/Sin migraciones pendientes/);
+  await expect(reader.query("SELECT * FROM v_obsoleta")).rejects.toMatchObject({
+    code: "ER_NO_SUCH_TABLE",
+  });
+  await expect(
+    migration.query("UPDATE finance_test_ro.v_tags SET name = 'Prueba S18'"),
+  ).rejects.toMatchObject({ code: "ER_NON_UPDATABLE_TABLE" });
+  await migration.execute(
+    "UPDATE accounts SET archived_at = '2026-11-24 00:00:00.123' WHERE id = ?",
+    [reportingAccount],
+  );
+  await app.execute(
+    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', 1)",
+    [transaction, reportingAccount],
+  );
+  await app.execute("INSERT INTO tags (name) VALUES ('Prueba S18')");
+  await app.execute(
+    "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Prueba S18'",
+    [transaction],
+  );
+  try {
+    const [accounts] = await reader.execute(
+      "SELECT CAST(archived_at AS CHAR) AS archived_at FROM v_accounts WHERE id = ?",
+      [reportingAccount],
+    );
+    expect(accounts).toEqual([{ archived_at: "2026-11-24 00:00:00.123" }]);
+    const [postings] = await reader.execute(
+      "SELECT account_kind, CAST(transaction_date AS CHAR) AS transaction_date FROM v_postings WHERE transaction_id = ?",
+      [transaction],
+    );
+    expect(postings).toEqual([
+      { account_kind: "equity", transaction_date: "2026-11-24" },
+    ]);
+    const tags = () =>
+      reader.execute(
+        "SELECT * FROM v_transaction_tags WHERE transaction_id = ?",
+        [transaction],
+      );
+    expect((await tags())[0]).toHaveLength(1);
+    await app.execute(
+      "UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [transaction],
+    );
+    expect((await tags())[0]).toEqual([]);
+  } finally {
+    await migration.execute(
+      "UPDATE accounts SET archived_at = NULL WHERE id = ?",
+      [reportingAccount],
+    );
+    await app.execute(
+      "UPDATE transactions SET deleted_at = NULL WHERE id = ?",
+      [transaction],
+    );
+    await app.execute("DELETE FROM postings WHERE transaction_id = ?", [
+      transaction,
+    ]);
+    await app.execute("DELETE FROM transaction_tags WHERE transaction_id = ?", [
+      transaction,
+    ]);
+    await app.execute("DELETE FROM tags WHERE name = 'Prueba S18'");
+  }
+}, 15_000);
+
+test("S20: the deploy backup restores data, views, foreign keys, virtual columns and triggers", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "finance-restore-"));
+  const { host, port, user, password } = localDatabase(
+    "MIGRATION_DATABASE_URL",
+  );
+  const windows = process.platform === "win32";
+  const clientDir = windows ? join(setting("MARIADB_HOME"), "bin") : undefined;
+  const client = (name: string) =>
+    clientDir ? join(clientDir, `${name}.exe`) : name;
+  const shellPath = (path: string) => path.replaceAll("\\", "/");
+  const options = shellPath(join(fixture, "mysql.cnf"));
+  const dump = () =>
+    execFileSync(client("mysqldump"), [
+      `--defaults-file=${options}`,
+      "--single-transaction",
+      "--skip-dump-date",
+      "--order-by-primary",
+      schema,
+    ]);
+  const invoke = (action: string) =>
+    execFileSync(
+      windows
+        ? resolve(
+            execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(),
+            "../../../bin/bash.exe",
+          )
+        : "bash",
+      [
+        "-c",
+        'set -euo pipefail; source "$1"; options=$2; backup=$3; database=$4; client_dir=$5; PATH="${client_dir:+$client_dir:}$PATH"; run_logged() { "$@"; }; "$6"',
+        "s20",
+        shellPath(resolve("src/deploy/database.sh")),
+        options,
+        shellPath(join(fixture, "backup.sql")),
+        schema,
+        clientDir ? shellPath(clientDir).replace(/^([A-Za-z]):/, "/$1") : "",
+        action,
+      ],
+    );
+  try {
+    await writeFile(
+      options,
+      `[client]\nhost=${host}\nport=${port}\nuser=${JSON.stringify(user)}\npassword=${JSON.stringify(password)}\n`,
+      { mode: 0o600 },
+    );
+    await migration.query(
+      "CREATE VIEW restore_fixture AS SELECT id, active_parent_id FROM accounts",
+    );
+    await migration.query(
+      "CREATE TRIGGER restore_fixture_trigger BEFORE INSERT ON tags FOR EACH ROW SET NEW.name = CONCAT(NEW.name, '!')",
+    );
+    await migration.query("INSERT INTO tags (name) VALUES ('Ida y vuelta')");
+    await migration.execute(
+      "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Ida y vuelta!'",
+      [transaction],
+    );
+    await migration.execute(
+      "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
+      [transaction, reportingAccount, "9007199254740993"],
+    );
+    await migration.execute(
+      "INSERT INTO audit_log (operation_id, table_name, row_id, action, `after`) VALUES (?, 'transactions', ?, 'insert', '{}')",
+      [uuid, transaction],
+    );
+    await migration.execute("UPDATE transactions SET custom = ? WHERE id = ?", [
+      JSON.stringify({ label: "prueba ñ", lines: ["a\nb", "DELIMITER ;;"] }),
+      transaction,
+    ]);
+    const before = dump();
+    const readonlyDefinitions = () =>
+      Promise.all(
+        views.map(
+          async (view) =>
+            (
+              await migration.query(
+                `SHOW CREATE VIEW ${readOnlySchema}.${view}`,
+              )
+            )[0],
+        ),
+      );
+    const beforeViews = await readonlyDefinitions();
+    invoke("backup_database");
+    await migration.query("DROP VIEW restore_fixture");
+    await migration.query("CREATE TABLE orphan (id INT)");
+    await migration.query("DELETE FROM transaction_tags");
+    await migration.query("DELETE FROM tags");
+    invoke("restore_database");
+    expect(dump().equals(before)).toBe(true);
+    expect(await readonlyDefinitions()).toEqual(beforeViews);
+    expect(
+      (
+        await reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
+          transaction,
+        ])
+      )[0],
+    ).toHaveLength(1);
+    expect((await migration.query("SELECT name FROM tags"))[0]).toEqual([
+      { name: "Ida y vuelta!" },
+    ]);
+    await expect(
+      migration.query("DELETE FROM audit_log"),
+    ).rejects.toMatchObject({
+      sqlState: "45000",
+    });
+    await expect(
+      migration.execute(
+        "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BAD', 1)",
+        [transaction, reportingAccount],
+      ),
+    ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}, 30_000);

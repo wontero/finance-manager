@@ -234,21 +234,6 @@ run_logged() {
   return "${result[0]}"
 } 3>&1
 
-restore_database() {
-  local drops
-  drops=$(run_logged mysql --defaults-file="$options" --database="$database" \
-    --batch --skip-column-names --raw --execute="
-      SELECT CONCAT('DROP ', IF(TABLE_TYPE = 'VIEW', 'VIEW', 'TABLE'), ' ',
-                    CHAR(96), REPLACE(TABLE_NAME, CHAR(96), REPEAT(CHAR(96), 2)), CHAR(96), ';')
-      FROM information_schema.tables
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-      ORDER BY TABLE_TYPE DESC, TABLE_NAME") || return 1
-  {
-    printf 'SET FOREIGN_KEY_CHECKS=0;\n%s\nSET FOREIGN_KEY_CHECKS=1;\n' "$drops"
-    cat -- "$backup"
-  } | run_logged mysql --defaults-file="$options" --database="$database" --binary-mode
-}
-
 [[ -d $repo ]] || git init --quiet --bare "$repo"
 run_logged git -C "$repo" fetch --quiet --no-tags -- "$repo_url" "$mode" ||
   fail "No se pudo descargar la ref. Revisa la URL, la ref y la deploy key. Log: $log"
@@ -282,10 +267,10 @@ ln -s -- "$shared/logs" "$staged/logs"
         process.exitCode = 1;
       }
     ' "$database" || fail 'DEPLOY_DB_NAME debe coincidir con MIGRATION_DATABASE_URL y, si existe, DATABASE_URL.'
+    source "$staged/src/deploy/database.sh"
     install -d -m 700 -- "$shared/backups"
     backup=$(mktemp "$shared/backups/${staged##*/}.XXXXXX.sql")
-    if ! run_logged mysqldump --defaults-file="$options" --single-transaction "$database" > "$backup" ||
-       [[ ! -s $backup ]]; then
+    if ! backup_database; then
       rm -f -- "$backup"
       fail "Falló la copia de MariaDB. No se ejecutó la migración. Log: $log"
     fi

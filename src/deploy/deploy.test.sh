@@ -17,10 +17,12 @@ install -m 600 /dev/null "$DEPLOY_ROOT/shared/mysql.cnf"
 
 git init -q -b main "$DEPLOY_REPO_URL"
 commit() {
-  git -C "$DEPLOY_REPO_URL" add package.json
+  git -C "$DEPLOY_REPO_URL" add package.json src
   git -C "$DEPLOY_REPO_URL" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm "$1"
 }
 echo '{}' > "$DEPLOY_REPO_URL/package.json"
+mkdir -p "$DEPLOY_REPO_URL/src/deploy"
+cp -- "${script%/*}/database.sh" "${script%/*}/trigger-preflight.sql" "$DEPLOY_REPO_URL/src/deploy/"
 commit bootstrap
 
 cat > "$DEPLOY_NODE_BIN/npm" <<'EOF'
@@ -61,7 +63,13 @@ cat > "$DEPLOY_NODE_BIN/mysqldump" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $1 == --defaults-file="$DEPLOY_ROOT/shared/mysql.cnf" ]]
-[[ $2 == --single-transaction && $3 == finance_test && $# == 3 ]]
+[[ $2 == --single-transaction && $* == *--no-create-db* && $* == *--skip-add-drop-database* ]]
+if [[ $* == *--no-create-info* ]]; then
+  echo dump-triggers >> "$EVENTS"
+  printf 'CREATE TRIGGER fixture_trigger BEFORE INSERT ON accounts FOR EACH ROW SET NEW.id = 1;\n'
+  exit 0
+fi
+[[ $* == *--skip-triggers* && ${!#} == finance_test ]]
 echo backup >> "$EVENTS"
 if [[ ${FAIL_DUMP:-0} == 1 ]]; then
   echo 'mysqldump: error de prueba backup-secret' >&2
@@ -74,19 +82,31 @@ cat > "$DEPLOY_NODE_BIN/mysql" <<'EOF'
 set -euo pipefail
 [[ $1 == --defaults-file="$DEPLOY_ROOT/shared/mysql.cnf" ]]
 [[ $2 == --database=finance_test ]]
-if [[ $# -gt 2 ]]; then
-  if [[ $3 == --binary-mode ]]; then
+[[ $3 == --init-command=*STRICT_ALL_TABLES*+00:00* && $4 == --skip-force && $5 == --default-character-set=utf8mb4 ]]
+shift 5
+if [[ $# -gt 0 ]]; then
+  if [[ $1 == --binary-mode ]]; then
     echo restore >> "$EVENTS"
     if [[ ${FAIL_RESTORE:-0} == 1 ]]; then
       echo 'mysql: error de restauración de prueba backup-secret' >&2
       exit 1
     fi
-    [[ $(cat) == $'SET FOREIGN_KEY_CHECKS=0;\nDROP VIEW `v_accounts`;\nDROP TABLE `accounts`;\nDROP TABLE `orphan`;\nSET FOREIGN_KEY_CHECKS=1;\nCREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;' ]]
+    [[ $(cat) == $'SET FOREIGN_KEY_CHECKS=0;\nDROP VIEW `v_accounts`;\nDROP TABLE `accounts`;\nDROP TABLE `orphan`;\nCREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;\nCREATE TRIGGER fixture_trigger BEFORE INSERT ON accounts FOR EACH ROW SET NEW.id = 1;\n\nSET FOREIGN_KEY_CHECKS=1;' ]]
     printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
     exit 0
   fi
-  [[ $3 == --batch && $4 == --skip-column-names && $5 == --raw && $6 == --execute=* ]]
-  [[ $6 == *information_schema.tables* && $6 == *'DATABASE()'* ]]
+  [[ $1 == --batch && $2 == --skip-column-names && $3 == --raw && $4 == --execute=* ]]
+  if [[ $4 == *'@@log_bin'* ]]; then
+    echo preflight >> "$EVENTS"
+    if [[ ${BINLOG_BLOCKED:-0} == 1 ]] ||
+       { [[ ${BLOCK_RESTORE:-0} == 1 ]] && grep -qx migrate "$EVENTS"; }; then
+      printf '1\t0\t1\t0\t0\n'
+    else
+      printf '0\t0\t1\t0\t0\n'
+    fi
+    exit 0
+  fi
+  [[ $4 == *information_schema.tables* && $4 == *'DATABASE()'* ]]
   echo inspect >> "$EVENTS"
   while IFS= read -r name; do
     case $name in
@@ -151,9 +171,21 @@ echo 'MIGRATION_DATABASE_URL=mysql://migration:migration%40secret@localhost/fina
 if DEPLOY_DB_NAME=other deploy; then fail 'f: aceptó una base distinta de la que migra'; fi
 [[ ! -s "$EVENTS" ]] || fail 'f: copió o migró con una base distinta'
 : > "$EVENTS"
+if output=$(BINLOG_BLOCKED=1 deploy 2>&1); then fail 'S19: aceptó binlog sin SUPER'; fi
+[[ $output == *log_bin_trust_function_creators* && $(cat "$EVENTS") == preflight &&
+   $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts' ]] || fail 'S19: modificó la BD o faltó el diagnóstico'
+: > "$EVENTS"
+if output=$(FAIL_MIGRATE=1 BLOCK_RESTORE=1 deploy 2>&1); then fail 'S19: restauró sin SUPER'; fi
+[[ $output == *log_bin_trust_function_creators* &&
+   $(cat "$EVENTS") == $'preflight\nbackup\ndump-triggers\nmigrate\npreflight' &&
+   $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts\norphan' ]] ||
+  fail 'S19: la restauración modificó objetos tras el prechequeo fallido'
+printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
+echo 'PASA M-003B S19'
+: > "$EVENTS"
 if FAIL_MIGRATE=1 deploy; then fail 'f: se aceptó la migración fallida'; fi
 [[ $(current) == "$active" ]] || fail 'f: current cambió'
-[[ $(cat "$EVENTS") == $'backup\nmigrate\ninspect\nrestore' ]] || fail 'f: orden de copia, migración y restauración'
+[[ $(cat "$EVENTS") == $'preflight\nbackup\ndump-triggers\nmigrate\npreflight\ninspect\nrestore' ]] || fail 'f: orden de copia, migración y restauración'
 [[ $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts' ]] || fail 'f: la restauración dejó objetos ajenos al volcado'
 if grep -Eqi '(DROP|CREATE) DATABASE' "$DEPLOY_ROOT"/shared/backups/*.sql; then
   fail 'f: el volcado modifica la base'
@@ -161,7 +193,7 @@ fi
 : > "$EVENTS"
 deploy
 [[ $(current) != "$active" ]] || fail 'f: no se activó la migración correcta'
-[[ $(cat "$EVENTS") == $'backup\nmigrate\nhealth' ]] || fail 'f: orden de copia, migración y salud'
+[[ $(cat "$EVENTS") == $'preflight\nbackup\ndump-triggers\nmigrate\nhealth' ]] || fail 'f: orden de copia, migración y salud'
 echo 'PASA S9f'
 
 active=$(current)
@@ -184,7 +216,7 @@ log_from_error() {
 }
 : > "$EVENTS"
 if output=$(FAIL_DUMP=1 deploy 2>&1); then fail 'S14: se aceptó una copia fallida'; fi
-[[ $(current) == "$active" && $(cat "$EVENTS") == backup ]] || fail 'S14: cambió current o se llamó a migrate'
+[[ $(current) == "$active" && $(cat "$EVENTS") == $'preflight\nbackup' ]] || fail 'S14: cambió current o se llamó a migrate'
 log=$(log_from_error "$output")
 [[ -f $log && $(stat -c '%a' "$log") == 600 ]] || fail 'S14: log ausente o permisos incorrectos'
 grep -Fq 'mysqldump: error de prueba' "$log" || fail 'S14: error de mysqldump ausente'

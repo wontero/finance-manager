@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { sql } from "kysely";
 import { FileMigrationProvider, Migrator } from "kysely/migration";
 import { readMigrationConfig } from "./config.js";
 import { createDatabase } from "./database.js";
@@ -10,6 +11,38 @@ async function migrate() {
   const config = readMigrationConfig(process.env);
   const { db } = createDatabase(config.connection);
   try {
+    const server =
+      path.basename(import.meta.dirname) === "dist"
+        ? path.dirname(import.meta.dirname)
+        : import.meta.dirname;
+    const preflight = await fs.readFile(
+      path.join(server, "../deploy/trigger-preflight.sql"),
+      "utf8",
+    );
+    const {
+      rows: [status],
+    } = await db.executeQuery(
+      sql
+        .raw<{
+          log_bin: number;
+          trust: number;
+          can_trigger: number;
+          has_super: number;
+        }>(preflight)
+        .compile(db),
+    );
+    if (!status)
+      throw new Error(
+        "No se pudieron comprobar los permisos de triggers de MariaDB.",
+      );
+    if (status.log_bin && !status.trust && !status.has_super)
+      throw new Error(
+        "Pide al administrador que habilite log_bin_trust_function_creators para crear triggers con el binlog activo.",
+      );
+    if (!status.can_trigger)
+      throw new Error(
+        "Pide al administrador el privilegio TRIGGER sobre la base principal para el usuario de migración.",
+      );
     const migrator = new Migrator({
       db,
       provider: new FileMigrationProvider({
