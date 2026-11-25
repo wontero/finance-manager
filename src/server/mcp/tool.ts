@@ -39,7 +39,13 @@ export function registerTool<
     async (input): Promise<CallToolResult> => {
       try {
         const [data, text] = await run(input);
-        return { structuredContent: data, content: [{ type: "text", text }] };
+        const json = JSON.stringify(data);
+        return {
+          structuredContent: data,
+          content: [
+            { type: "text", text: text === json ? text : `${text}\n\n${json}` },
+          ],
+        };
       } catch (error) {
         const message =
           error instanceof Error &&

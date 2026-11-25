@@ -15,6 +15,7 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Corregido
 
+- Las respuestas MCP incluyen los datos estructurados en el texto para clientes que no leen `structuredContent`.
 - La comprobación de salud del despliegue usa un User-Agent propio para evitar el rechazo de ModSecurity al User-Agent por defecto de `curl`.
 
 ## [0.1.0] - sin fecha

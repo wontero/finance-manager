@@ -304,6 +304,46 @@ export function mcpSpecs(
         expect(instructions).toMatch(part);
     });
 
+    test("M-019 S1: el texto incluye el resumen y los datos estructurados", async () => {
+      for (const [name, args, summary] of [
+        [
+          "resumen_periodo",
+          { desde: date, hasta: date },
+          /^Resumen del 1993-09-12 al 1993-09-12\. Categorías en esta página: \d+\./,
+        ],
+        [
+          "buscar_movimientos",
+          { desde: date, hasta: date },
+          /^Movimientos en esta página: \d+\.$/,
+        ],
+        [
+          "crear_categoria",
+          { nombre: "Categoría M-019", padre: "Gastos" },
+          /^Categoría creada\. Puedes deshacerla con deshacer_operacion y el ID .+\.$/,
+        ],
+      ] as const) {
+        const result = await call(name, args);
+        expect(result.isError).not.toBe(true);
+        const content = result.content as { type: string; text: string }[];
+        expect(content).toHaveLength(1);
+        expect(content[0].type).toBe("text");
+        const [text, json] = content[0].text.split("\n\n");
+        expect(text).toMatch(summary);
+        expect(JSON.parse(json)).toEqual(result.structuredContent);
+        expect(content[0].text).toBe(
+          `${text}\n\n${JSON.stringify(result.structuredContent)}`,
+        );
+      }
+    });
+
+    test("M-019 S2: ping no duplica el JSON", async () => {
+      const result = await call("ping");
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toEqual([
+        { type: "text", text: JSON.stringify(result.structuredContent) },
+      ]);
+    });
+
     test("M-017 S5: publica las instrucciones y el contrato de escritura", async () => {
       const instructions = sdk.getInstructions()?.split("\n");
       expect(instructions).toContain(
@@ -963,7 +1003,12 @@ export function mcpSpecs(
       expect(result.structuredContent).toMatchObject({
         movimientos: [{ descripcion: stored }],
       });
-      expect(JSON.stringify(result.content)).not.toContain(stored);
+      expect(result.content).toEqual([
+        {
+          type: "text",
+          text: `Movimientos en esta página: 1.\n\n${JSON.stringify(result.structuredContent)}`,
+        },
+      ]);
     });
 
     test("S13: ambos recortes cierran sus consultas y el lector sigue disponible", async () => {
