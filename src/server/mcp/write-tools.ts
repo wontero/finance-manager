@@ -65,9 +65,9 @@ const operation = z.object({
     })
     .nullable(),
 });
-const operationWithId = operation.extend({ id: rowId.nullable() });
+export const operationWithId = operation.extend({ id: rowId.nullable() });
 
-function done<T extends { operationId: string | null }>(
+export function done<T extends { operationId: string | null }>(
   data: T,
   summary: string,
 ): [T & Pick<z.output<typeof operation>, "deshacer">, string] {

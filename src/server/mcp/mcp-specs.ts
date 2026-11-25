@@ -28,6 +28,7 @@ const reads = [
   "listar_etiquetas_y_campos",
   "listar_operaciones",
   "consulta_sql",
+  "consultar_prestamos",
 ];
 const writes = [
   "registrar_gasto",
@@ -45,6 +46,8 @@ const writes = [
   "registrar_tipo_de_cambio",
   "definir_campo_personalizado",
   "deshacer_operacion",
+  "registrar_prestamo",
+  "abonar_prestamo",
 ];
 const destructive = [
   "editar_movimiento",
@@ -279,6 +282,9 @@ export function mcpSpecs(
         /importar_lote/,
         /duplicados/,
         /deshacer_operacion/,
+        /registrar_prestamo/,
+        /abonar_prestamo/,
+        /tasa.*período/,
         /datos.*instrucciones/,
       ])
         expect(instructions).toMatch(part);
@@ -930,6 +936,326 @@ export function mcpSpecs(
         expect(message).toMatch(totalsRule);
         expect(message).toMatch(breakdownRule);
       }
+    });
+
+    describe("M-008: préstamos", () => {
+      const start = "2024-01-01";
+      const later = "2024-01-31";
+      const end = "2024-03-01";
+      const register = (
+        cuenta: string | undefined,
+        persona: string,
+        extra = {},
+      ) =>
+        write("registrar_prestamo", {
+          direccion: "given",
+          persona,
+          monto: "500",
+          moneda: "BOB",
+          fecha: start,
+          tasa: "2",
+          periodo: "monthly",
+          cuenta,
+          ...extra,
+        });
+      const pay = (id: string, cuenta: string, monto: string, fecha = later) =>
+        write("abonar_prestamo", { id, cuenta, monto, fecha });
+      const status = (id: string, fecha = later) =>
+        success("consultar_prestamos", { id, fecha });
+      const postings = async (operationId: string) => {
+        const [lines] = await migration().execute<RowDataPacket[]>(
+          "SELECT a.name, a.subtype, a.parent_id, p.amount FROM transactions t JOIN postings p ON p.transaction_id = t.id JOIN accounts a ON a.id = p.account_id WHERE t.operation_id = ? ORDER BY p.id",
+          [operationId],
+        );
+        return lines;
+      };
+      const loanState = async (id: string) => {
+        const [rows] = await migration().execute<RowDataPacket[]>(
+          "SELECT * FROM loans WHERE id = ?",
+          [id],
+        );
+        return rows[0];
+      };
+
+      test("M-008 S3: alta dada, recibida, sin caja y moneda distinta", async () => {
+        const bob = await account("Caja S3 BOB");
+        const dollars = await account("Caja S3 USD", "USD");
+        const given = await register(bob.id, "Juan S3");
+        expect(await postings(given.operationId)).toMatchObject([
+          { name: "Caja S3 BOB", amount: "-50000" },
+          {
+            name: "Préstamo a Juan S3 · 2024-01-01",
+            subtype: "por_cobrar",
+            parent_id: null,
+            amount: "50000",
+          },
+        ]);
+        expect(await loanState(given.id)).toMatchObject({
+          direction: "given",
+          principal: "50000",
+          start_date: start,
+          rate: "2.000000",
+        });
+        const received = await register(bob.id, "Juan S3", {
+          direccion: "received",
+        });
+        expect(await postings(received.operationId)).toMatchObject([
+          { name: "Caja S3 BOB", amount: "50000" },
+          {
+            name: "Préstamo de Juan S3 · 2024-01-01",
+            subtype: "prestamo_recibido",
+            parent_id: null,
+            amount: "-50000",
+          },
+        ]);
+        const opening = await register(undefined, "Juan S3", {
+          sin_movimiento_de_caja: true,
+        });
+        expect(await postings(opening.operationId)).toMatchObject([
+          { name: "Saldos iniciales", amount: "-50000" },
+          { name: "Préstamo a Juan S3 · 2024-01-01 (2)", amount: "50000" },
+        ]);
+        await failure(
+          "registrar_prestamo",
+          {
+            cuenta: dollars.id,
+            direccion: "given",
+            persona: "Juan S3",
+            monto: "500",
+            moneda: "BOB",
+            tasa: "2",
+            periodo: "monthly",
+          },
+          /transferir primero/i,
+        );
+      });
+
+      test("M-008 S4: partidas espejo y reconocimiento de intereses solo al pagar", async () => {
+        const bob = await account("Caja de préstamos S4");
+        const given = await register(bob.id, "Persona S4");
+        const received = await register(bob.id, "Persona S4", {
+          direccion: "received",
+        });
+        await status(given.id);
+        const [before] = await migration().query<RowDataPacket[]>(
+          "SELECT id FROM accounts WHERE name = 'Intereses'",
+        );
+        expect(before).toEqual([]);
+        const collected = await pay(given.id, bob.id, "100");
+        const paid = await pay(received.id, bob.id, "100");
+        for (const [payment, sign, root] of [
+          [collected, 1n, "Ingresos"],
+          [paid, -1n, "Gastos"],
+        ] as const) {
+          const lines = await postings(payment.operationId);
+          expect(lines.map(({ amount }) => amount)).toEqual(
+            [10000n, -9014n, -986n].map((value) => String(value * sign)),
+          );
+          const [parents] = await migration().execute<RowDataPacket[]>(
+            "SELECT name FROM accounts WHERE id = ?",
+            [lines[2].parent_id],
+          );
+          expect(lines[2].name).toBe("Intereses");
+          expect(parents).toEqual([{ name: root }]);
+        }
+        const interestOnly = await register(bob.id, "Solo interés S4");
+        const partial = await pay(interestOnly.id, bob.id, "1");
+        expect(
+          (await postings(partial.operationId)).map(({ amount }) => amount),
+        ).toEqual(["100", "-100"]);
+        expect(await status(interestOnly.id)).toMatchObject({
+          prestamo: {
+            capital_pendiente: { monto: "500.00" },
+            interes_pendiente: { monto: "8.86" },
+            abonos: [
+              {
+                monto: { monto: "1.00" },
+                interes: { monto: "1.00" },
+                capital: { monto: "0.00" },
+              },
+            ],
+          },
+        });
+        const [asiento] = await migration().execute<RowDataPacket[]>(
+          "SELECT id FROM transactions WHERE operation_id = ?",
+          [partial.operationId],
+        );
+        await failure(
+          "borrar_movimiento",
+          { id: String(asiento[0].id) },
+          /préstamo.*deshacer/i,
+        );
+      });
+
+      test("M-008 S5: sobrepago, fechas, cierre y reversión del saldo", async () => {
+        const bob = await account("Caja S5");
+        const loan = await register(bob.id, "Persona S5");
+        const repay = (monto: string, fecha: string, message: RegExp) =>
+          failure(
+            "abonar_prestamo",
+            { id: loan.id, cuenta: bob.id, monto, fecha },
+            message,
+          );
+        await repay("1", "2023-12-31", /fecha.*alta/i);
+        await repay("509.87", later, /509,86 BOB/);
+        await pay(loan.id, bob.id, "100");
+        await repay("1", "2024-01-30", /fecha.*último abono/i);
+        const final = await pay(loan.id, bob.id, "409.86");
+        expect(await loanState(loan.id)).toMatchObject({
+          closed_at: expect.any(String),
+        });
+        expect(await status(loan.id)).toMatchObject({
+          prestamo: { estado: "cerrado", total: { monto: "0.00" } },
+        });
+        await write("deshacer_operacion", { operationId: final.operationId });
+        const row = await loanState(loan.id);
+        expect(row.closed_at).toBeNull();
+        expect(
+          await success("ver_saldo", {
+            cuenta: String(row.account_id),
+            fecha: later,
+          }),
+        ).toMatchObject({
+          saldo: { monto: "409.86" },
+        });
+        expect(await status(loan.id)).toMatchObject({
+          prestamo: { estado: "abierto", total: { monto: "409.86" } },
+        });
+      });
+
+      test("M-008 S5: abonos concurrentes compiten por el mismo saldo", async () => {
+        const bob = await account("Caja simultánea S5");
+        const loan = await register(bob.id, "Simultáneo S5", { tasa: "0" });
+        const args = {
+          id: loan.id,
+          cuenta: bob.id,
+          monto: "400",
+          fecha: later,
+        };
+        const results = await Promise.all([
+          call("abonar_prestamo", args),
+          call("abonar_prestamo", args),
+        ]);
+        const errors = results.filter(({ isError }) => isError);
+        expect(errors).toHaveLength(1);
+        expect(JSON.stringify(errors[0].content)).toContain("100,00 BOB");
+        expect(await status(loan.id)).toMatchObject({
+          prestamo: {
+            total: { monto: "100.00" },
+            abonos: [{ monto: { monto: "400.00" } }],
+          },
+        });
+      });
+
+      test("M-008 S6: filtros, grupos, totales por moneda y corte histórico", async () => {
+        const bob = await account("Caja S6 BOB");
+        const dollars = await account("Caja S6 USD", "USD");
+        const loan = await register(bob.id, "Juán S6", { vencimiento: end });
+        const loanUsd = await register(dollars.id, "juan S6", {
+          moneda: "USD",
+          tasa: "0",
+        });
+        const debt = await register(dollars.id, "Juan S6", {
+          direccion: "received",
+          moneda: "USD",
+          monto: "30",
+          tasa: "0",
+        });
+        await pay(loan.id, bob.id, "100");
+        await pay(loanUsd.id, dollars.id, "500", end);
+        expect(await status(loan.id, start)).toMatchObject({
+          prestamo: {
+            capital_pendiente: { monto: "500.00" },
+            interes_pendiente: { monto: "0.00" },
+            abonos: [],
+          },
+        });
+        expect(await status(loan.id, end)).toMatchObject({
+          prestamo: {
+            capital_pendiente: { monto: "409.86" },
+            interes_pendiente: { monto: "8.09" },
+            total: { monto: "417.95" },
+            vencimiento: end,
+            abonos: [
+              {
+                fecha: later,
+                monto: { monto: "100.00" },
+                capital: { monto: "90.14" },
+                interes: { monto: "9.86" },
+              },
+            ],
+          },
+        });
+        const list = (fecha: string, estado?: string) =>
+          success("consultar_prestamos", { persona: "JUAN S6", fecha, estado });
+        expect(await list(later)).toMatchObject({
+          personas: [
+            {
+              persona: "Juán S6",
+              prestamos: [{ id: loan.id }, { id: loanUsd.id }, { id: debt.id }],
+            },
+          ],
+          totales: [
+            { moneda: "BOB", por_cobrar: { monto: "409.86" } },
+            {
+              moneda: "USD",
+              por_cobrar: { monto: "500.00" },
+              por_pagar: { monto: "30.00" },
+            },
+          ],
+        });
+        expect(await list(end, "abierto")).toMatchObject({
+          personas: [{ prestamos: [{ id: loan.id }, { id: debt.id }] }],
+          totales: [
+            { moneda: "BOB", por_cobrar: { monto: "417.95" } },
+            { moneda: "USD", por_pagar: { monto: "30.00" } },
+          ],
+        });
+        expect(await list(end, "cerrado")).toMatchObject({
+          personas: [{ prestamos: [{ id: loanUsd.id }] }],
+          totales: [{ moneda: "USD", por_cobrar: { monto: "0.00" } }],
+        });
+      });
+
+      test("M-008 S7: reversión del alta y bloqueo de abonos intermedios", async () => {
+        const bob = await account("Caja S7");
+        const loan = await register(bob.id, "Persona S7");
+        const row = await loanState(loan.id);
+        const first = await pay(loan.id, bob.id, "100");
+        const second = await pay(loan.id, bob.id, "100");
+        expect(
+          await failure(
+            "deshacer_operacion",
+            { operationId: first.operationId },
+            /operaciones/i,
+          ),
+        ).toContain(second.operationId);
+        await write("deshacer_operacion", { operationId: second.operationId });
+        await write("deshacer_operacion", { operationId: first.operationId });
+        const undone = await write("deshacer_operacion", {
+          operationId: loan.operationId,
+        });
+        expect(await loanState(loan.id)).toBeUndefined();
+        expect(await postings(loan.operationId)).toEqual([]);
+        const [rows] = await migration().execute<RowDataPacket[]>(
+          "SELECT id FROM accounts WHERE id = ?",
+          [row.account_id],
+        );
+        expect(rows).toEqual([]);
+        await write("deshacer_operacion", { operationId: undone.operationId });
+        expect(await loanState(loan.id)).toMatchObject({ principal: "50000" });
+      });
+
+      test("M-008 S8: vista lectora y catálogo SQL", async () => {
+        const { tools } = await sdk.listTools();
+        expect(tools).toHaveLength(28);
+        expect(
+          tools.find(({ name }) => name === "consulta_sql")?.description,
+        ).toContain("v_loans(");
+        await success("consulta_sql", {
+          sql: "SELECT id, direction, principal FROM v_loans LIMIT 1",
+        });
+      });
     });
   });
 }
