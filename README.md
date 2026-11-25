@@ -65,7 +65,7 @@ Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
-- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. Aplica las migraciones en `finance_test` y `finance_test_ro` y comprueba el arranque, el esquema y los tres perfiles de acceso.
+- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. **Borra y recrea** `finance_test` y `finance_test_ro` en cada ejecución. Comprueba el arranque, el esquema, los tres perfiles de acceso y la copia y restauración con `mysqldump` y `mysql`. En Windows, usa Git para Windows y los clientes incluidos en `MARIADB_HOME/bin`. En Linux, estos clientes y Bash deben estar en `PATH`.
 - `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
 
