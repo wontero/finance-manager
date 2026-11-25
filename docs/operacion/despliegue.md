@@ -1,6 +1,6 @@
 # Despliegue en cPanel
 
-Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. El conector MCP usa OAuth y ofrece herramientas contables y `ping`.
+Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `<usuario-cpanel>`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. El conector MCP usa OAuth y ofrece herramientas contables y `ping`.
 
 ## 0. Comprueba las herramientas
 
@@ -28,13 +28,13 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
 
 ## 2. Prepara MariaDB y el entorno
 
-1. Abre **Databases → Database Wizard** y **Manage My Databases**. Crea dos bases vacías (por ejemplo, `ingete7_finanzas` y `ingete7_finanzas_ro`) y tres usuarios con contraseñas distintas. Anota los nombres completos que muestra cPanel, incluido el prefijo. Al añadir cada usuario a una base, marca las casillas indicadas. [Database Wizard](https://docs.cpanel.net/cpanel/databases/database-wizard/)
+1. Abre **Databases → Database Wizard** y **Manage My Databases**. Crea dos bases vacías (por ejemplo, `<usuario-cpanel>_finanzas` y `<usuario-cpanel>_finanzas_ro`) y tres usuarios con contraseñas distintas. Anota los nombres completos que muestra cPanel, incluido el prefijo. Al añadir cada usuario a una base, marca las casillas indicadas. [Database Wizard](https://docs.cpanel.net/cpanel/databases/database-wizard/)
 
    | Usuario de ejemplo | Base principal                                 | Base de solo lectura |
    | ------------------ | ---------------------------------------------- | -------------------- |
-   | `ingete7_finapp`   | **SELECT**, **INSERT**, **UPDATE**, **DELETE** | Sin asignación       |
-   | `ingete7_finmig`   | **ALL PRIVILEGES**                             | **ALL PRIVILEGES**   |
-   | `ingete7_finro`    | Sin asignación                                 | **SELECT**           |
+   | `<usuario-cpanel>_finapp`   | **SELECT**, **INSERT**, **UPDATE**, **DELETE** | Sin asignación       |
+   | `<usuario-cpanel>_finmig`   | **ALL PRIVILEGES**                             | **ALL PRIVILEGES**   |
+   | `<usuario-cpanel>_finro`    | Sin asignación                                 | **SELECT**           |
 
    La cuenta de migración crea las vistas como su propia cuenta definidora. Conserva esa cuenta mientras existan las vistas. Mantén la base de consulta dedicada a las vistas que crea el proyecto. [Permisos de las vistas en MariaDB](https://mariadb.com/docs/server/server-usage/views/create-view)
 
@@ -52,10 +52,10 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
 3. Añade los nombres y las contraseñas del primer paso. En las URLs, codifica en porcentaje los caracteres reservados, por ejemplo `%40` para `@`. Guarda el archivo con **Ctrl+O**, **Enter** y **Ctrl+X** si usas Nano.
 
    ```dotenv
-   DATABASE_URL=mysql://ingete7_finapp:CLAVE_APP_CODIFICADA@localhost:3306/ingete7_finanzas
-   MIGRATION_DATABASE_URL=mysql://ingete7_finmig:CLAVE_MIG_CODIFICADA@localhost:3306/ingete7_finanzas
-   READONLY_DATABASE_NAME=ingete7_finanzas_ro
-   READONLY_DATABASE_URL=mysql://ingete7_finro:CLAVE_RO_CODIFICADA@localhost:3306/ingete7_finanzas_ro
+   DATABASE_URL=mysql://<usuario-cpanel>_finapp:CLAVE_APP_CODIFICADA@localhost:3306/<usuario-cpanel>_finanzas
+   MIGRATION_DATABASE_URL=mysql://<usuario-cpanel>_finmig:CLAVE_MIG_CODIFICADA@localhost:3306/<usuario-cpanel>_finanzas
+   READONLY_DATABASE_NAME=<usuario-cpanel>_finanzas_ro
+   READONLY_DATABASE_URL=mysql://<usuario-cpanel>_finro:CLAVE_RO_CODIFICADA@localhost:3306/<usuario-cpanel>_finanzas_ro
    PUBLIC_URL=https://finanzasmateo.ingetech.biz
    TRUST_PROXY=passenger
    OAUTH_ALLOWED_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback
@@ -104,7 +104,7 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
 
    ```ini
    [client]
-   user=ingete7_finmig
+   user=<usuario-cpanel>_finmig
    password="CLAVE_MIG"
    host=localhost
    port=3306
@@ -116,7 +116,7 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
 5. Comprueba la sesión con el usuario de migración.
 
    ```bash
-   mysql --defaults-file="$app_dir/shared/mysql.cnf" --database=ingete7_finanzas \
+   mysql --defaults-file="$app_dir/shared/mysql.cnf" --database=<usuario-cpanel>_finanzas \
      -e 'SELECT DATABASE(), CURRENT_USER(); SELECT @@log_bin, @@log_bin_trust_function_creators, @@sql_mode;'
    ```
 
@@ -147,7 +147,7 @@ Cuando `main` en GitHub contenga esta misión, ejecuta los siguientes comandos d
 
 ```bash
 export DEPLOY_REPO_URL="$repo_url"
-export DEPLOY_DB_NAME=ingete7_finanzas
+export DEPLOY_DB_NAME=<usuario-cpanel>_finanzas
 git init --bare "$app_dir/repo"
 git --git-dir="$app_dir/repo" fetch --no-tags "$repo_url" main
 bootstrap=$(mktemp)
@@ -183,7 +183,7 @@ Si usas `nohup`, sigue el ejemplo del paso 7 con `bash "$bootstrap" --bootstrap`
 
    Espera HTTP 200, el nombre `Finance Manager`, `status: "ok"` y `db: "ok"`. `db: "unavailable"` indica que falló la prueba de conexión y `db: "not_configured"` indica que falta `DATABASE_URL`. Abre también `https://finanzasmateo.ingetech.biz/` para comprobar la web. En el log de Passenger busca `Diagnóstico de IP de Passenger`. Comprueba que el socket sea Unix o loopback, que `passengerHeader` sea `true` y que `ip` coincida con la IP pública del cliente de la primera petición. Si el primer cliente fue otro, reinicia Passenger y vuelve a realizar la comprobación.
 
-4. Prueba primero `localhost:3306` como en el paso 2. Si `/health` devuelve `db: "unavailable"` y confirmaste el usuario y sus permisos, busca el socket Unix desde la cuenta de cPanel. Ejecuta `my_print_defaults client client-server client-mariadb | sed -n 's/^--socket=//p'` para mostrar solo la ruta configurada. Si el cliente puede conectarse, confirma la ruta real con `mysql --user=ingete7_USUARIO --password --execute "SHOW VARIABLES LIKE 'socket';"`. [Archivos de opciones de MariaDB](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/configuring-mariadb/configuring-mariadb-with-option-files)
+4. Prueba primero `localhost:3306` como en el paso 2. Si `/health` devuelve `db: "unavailable"` y confirmaste el usuario y sus permisos, busca el socket Unix desde la cuenta de cPanel. Ejecuta `my_print_defaults client client-server client-mariadb | sed -n 's/^--socket=//p'` para mostrar solo la ruta configurada. Si el cliente puede conectarse, confirma la ruta real con `mysql --user=<usuario-cpanel>_USUARIO --password --execute "SHOW VARIABLES LIKE 'socket';"`. [Archivos de opciones de MariaDB](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/configuring-mariadb/configuring-mariadb-with-option-files)
 
    Añade `DATABASE_SOCKET=/ruta/absoluta/mysql.sock` a `shared/.env`, usando la ruta que encontraste. `DATABASE_URL` sigue aportando el usuario, la contraseña y la base. Con el socket configurado, el servidor omite el host y el puerto. Ejecuta `touch "$app_dir/current/tmp/restart.txt"` para que Passenger relea la configuración y repite `/health`.
 
@@ -249,7 +249,7 @@ Veinte fallos en una hora pueden bloquear temporalmente nuevos inicios de sesió
 
    ```bash
    export BACKUP_RCLONE_REMOTE='finance-drive:FinanceManager/daily'
-   export DEPLOY_DB_NAME=ingete7_finanzas
+   export DEPLOY_DB_NAME=<usuario-cpanel>_finanzas
    rclone mkdir "$BACKUP_RCLONE_REMOTE"
    bash "$app_dir/current/src/deploy/backup.sh" run
    bash "$app_dir/current/src/deploy/backup.sh" list
@@ -267,14 +267,14 @@ En **Advanced → Cron Jobs**, comprueba el correo de **Cron Email**. En la term
 ```cron
 MAILTO=operador@example.invalid
 CRON_TZ=America/La_Paz
-30 3 * * * DEPLOY_DB_NAME=ingete7_finanzas BACKUP_RCLONE_REMOTE=finance-drive:FinanceManager/daily /bin/bash /home/ingete7/apps/finanzasmateo/current/src/deploy/backup.sh run
+30 3 * * * DEPLOY_DB_NAME=<usuario-cpanel>_finanzas BACKUP_RCLONE_REMOTE=finance-drive:FinanceManager/daily /bin/bash /home/<usuario-cpanel>/apps/finanzasmateo/current/src/deploy/backup.sh run
 ```
 
 El script toma internamente con `flock` el mismo bloqueo que usa el despliegue y espera hasta diez minutos. Confirma con `crontab -l` que la entrada quedó registrada y verifica la primera copia programada a las 03:30 de La Paz. Si la tarea falla, su stderr se envía a `MAILTO`. El diagnóstico filtrado queda en `shared/logs/backup-AAAAMMDD.log` con permisos 600.
 
 ## 9. Ensaya una restauración desde Drive
 
-1. En cPanel crea dos bases **vacías y desechables**, por ejemplo `ingete7_finprueba` y `ingete7_finprueba_ro`. Asigna a la cuenta de migración **ALL PRIVILEGES** en ambas. Comprueba los nombres y los permisos. Para comprobar las vistas con la cuenta de lectura, otórgale **SELECT** solo en la base temporal de vistas.
+1. En cPanel crea dos bases **vacías y desechables**, por ejemplo `<usuario-cpanel>_finprueba` y `<usuario-cpanel>_finprueba_ro`. Asigna a la cuenta de migración **ALL PRIVILEGES** en ambas. Comprueba los nombres y los permisos. Para comprobar las vistas con la cuenta de lectura, otórgale **SELECT** solo en la base temporal de vistas.
 2. Elige por nombre una copia de `rclone lsf "$BACKUP_RCLONE_REMOTE" --files-only`, descárgala a un directorio privado y verifica su integridad. Sustituye el nombre de ejemplo por uno del listado.
 
    ```bash
@@ -282,12 +282,12 @@ El script toma internamente con `flock` el mismo bloqueo que usa el despliegue y
    name=finanzas-AAAAMMDD-HHMMSS.sql.gz.gpg
    rclone copy "$BACKUP_RCLONE_REMOTE/$name" "$drill"
    bash "$app_dir/current/src/deploy/backup.sh" verify "$drill/$name"
-   DEPLOY_DB_NAME=ingete7_finprueba bash "$app_dir/current/src/deploy/backup.sh" restore "$drill/$name"
+   DEPLOY_DB_NAME=<usuario-cpanel>_finprueba bash "$app_dir/current/src/deploy/backup.sh" restore "$drill/$name"
    ```
 
-   Lee el nombre del destino antes de escribir `ingete7_finprueba` para confirmar. El comando reemplaza los objetos de la base indicada. Comprueba el mensaje de restauración y consulta con la cuenta de migración una cuenta presente al tomar la copia, un conteo de asientos y la lista de triggers de la base temporal.
+   Lee el nombre del destino antes de escribir `<usuario-cpanel>_finprueba` para confirmar. El comando reemplaza los objetos de la base indicada. Comprueba el mensaje de restauración y consulta con la cuenta de migración una cuenta presente al tomar la copia, un conteo de asientos y la lista de triggers de la base temporal.
 
-3. En el directorio privado del ensayo, crea `$drill/migrate.env` con permisos 600. Usa únicamente `MIGRATION_DATABASE_URL` con la cuenta de migración apuntando a `ingete7_finprueba`, `READONLY_DATABASE_NAME=ingete7_finprueba_ro` y `DATABASE_SOCKET` si corresponde. Ejecuta desde la release activa.
+3. En el directorio privado del ensayo, crea `$drill/migrate.env` con permisos 600. Usa únicamente `MIGRATION_DATABASE_URL` con la cuenta de migración apuntando a `<usuario-cpanel>_finprueba`, `READONLY_DATABASE_NAME=<usuario-cpanel>_finprueba_ro` y `DATABASE_SOCKET` si corresponde. Ejecuta desde la release activa.
 
    ```bash
    (cd "$app_dir/current" &&
@@ -295,7 +295,7 @@ El script toma internamente con `flock` el mismo bloqueo que usa el despliegue y
        node --env-file="$drill/migrate.env" src/server/dist/migrate.js)
    ```
 
-   Comprueba que el migrador genera las vistas en `ingete7_finprueba_ro` y contrasta los resultados de las vistas de cuentas y asientos con los datos restaurados. Comprueba en `/health` que producción continúa activa.
+   Comprueba que el migrador genera las vistas en `<usuario-cpanel>_finprueba_ro` y contrasta los resultados de las vistas de cuentas y asientos con los datos restaurados. Comprueba en `/health` que producción continúa activa.
 
 4. En **Manage My Databases**, comprueba los nombres y usa **Delete Database** sobre las dos bases de ensayo, primero la de vistas. Verifica que desaparecieron del listado y elimina el archivo temporal de entorno y la copia descargada de `$drill`.
 
@@ -306,7 +306,7 @@ Si están disponibles, abre `tmux new -s finanzas` o `screen -S finanzas` antes 
 ```bash
 app_dir="$HOME/apps/finanzasmateo"
 export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/finance_manager_deploy -o IdentitiesOnly=yes"
-export DEPLOY_DB_NAME=ingete7_finanzas
+export DEPLOY_DB_NAME=<usuario-cpanel>_finanzas
 bash "$app_dir/current/src/deploy/deploy.sh" main
 ```
 
