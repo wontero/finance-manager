@@ -9,6 +9,8 @@ export DEPLOY_ROOT="$fixture/app" DEPLOY_REPO_URL="$fixture/source"
 export DEPLOY_NODE_BIN="$fixture/bin" DEPLOY_HEALTH_ATTEMPTS=2
 export DEPLOY_HEALTH_DELAY=0 DEPLOY_HEALTH_URL=http://localhost/health
 export DEPLOY_DB_NAME=finance_test EVENTS="$fixture/events"
+export SCHEMA_OBJECTS="$fixture/schema-objects"
+printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
 mkdir -p "$DEPLOY_NODE_BIN" "$DEPLOY_ROOT/shared"
 touch "$DEPLOY_ROOT/shared/.env" "$EVENTS"
 install -m 600 /dev/null "$DEPLOY_ROOT/shared/mysql.cnf"
@@ -39,7 +41,8 @@ case "$*" in
   'run migrate')
     echo migrate >> "$EVENTS"
     if [[ ${FAIL_MIGRATE:-0} == 1 ]]; then
-      echo 'migrate: error de prueba mysql://user:app%40secret@localhost/test app@secret' >&2
+      echo orphan >> "$SCHEMA_OBJECTS"
+      echo 'migrate: error de prueba mysql://user:app%40secret@localhost/test app@secret migration@secret' >&2
       exit 1
     fi ;;
 esac
@@ -58,24 +61,38 @@ cat > "$DEPLOY_NODE_BIN/mysqldump" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $1 == --defaults-file="$DEPLOY_ROOT/shared/mysql.cnf" ]]
-[[ $2 == --single-transaction && $3 == --add-drop-database && $4 == --databases && $5 == finance_test ]]
+[[ $2 == --single-transaction && $3 == finance_test && $# == 3 ]]
 echo backup >> "$EVENTS"
 if [[ ${FAIL_DUMP:-0} == 1 ]]; then
   echo 'mysqldump: error de prueba backup-secret' >&2
   exit 1
 fi
-echo 'DROP DATABASE finance_test;'
+printf 'CREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;\n'
 EOF
 cat > "$DEPLOY_NODE_BIN/mysql" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $1 == --defaults-file="$DEPLOY_ROOT/shared/mysql.cnf" ]]
-grep -qx 'DROP DATABASE finance_test;'
+[[ $2 == --database=finance_test ]]
+if [[ $# -gt 2 ]]; then
+  [[ $3 == --batch && $4 == --skip-column-names && $5 == --raw && $6 == --execute=* ]]
+  [[ $6 == *information_schema.tables* && $6 == *'DATABASE()'* ]]
+  echo inspect >> "$EVENTS"
+  while IFS= read -r name; do
+    case $name in
+      v_*) printf 'DROP VIEW `%s`;\n' "$name" ;;
+      *) printf 'DROP TABLE `%s`;\n' "$name" ;;
+    esac
+  done < "$SCHEMA_OBJECTS"
+  exit 0
+fi
 echo restore >> "$EVENTS"
 if [[ ${FAIL_RESTORE:-0} == 1 ]]; then
   echo 'mysql: error de restauración de prueba backup-secret' >&2
   exit 1
 fi
+[[ $(cat) == $'SET FOREIGN_KEY_CHECKS=0;\nDROP TABLE `accounts`;\nDROP VIEW `v_accounts`;\nDROP TABLE `orphan`;\nSET FOREIGN_KEY_CHECKS=1;\nCREATE TABLE `accounts` (id INT);\nCREATE VIEW `v_accounts` AS SELECT id FROM `accounts`;' ]]
+printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
 EOF
 cat > "$DEPLOY_NODE_BIN/my_print_defaults" <<'EOF'
 #!/usr/bin/env bash
@@ -128,7 +145,11 @@ commit migration
 : > "$EVENTS"
 if FAIL_MIGRATE=1 deploy; then fail 'f: se aceptó la migración fallida'; fi
 [[ $(current) == "$active" ]] || fail 'f: current cambió'
-[[ $(cat "$EVENTS") == $'backup\nmigrate\nrestore' ]] || fail 'f: orden de copia, migración y restauración'
+[[ $(cat "$EVENTS") == $'backup\nmigrate\ninspect\nrestore' ]] || fail 'f: orden de copia, migración y restauración'
+[[ $(cat "$SCHEMA_OBJECTS") == $'accounts\nv_accounts' ]] || fail 'f: la restauración dejó objetos ajenos al volcado'
+if grep -Eqi '(DROP|CREATE) DATABASE' "$DEPLOY_ROOT"/shared/backups/*.sql; then
+  fail 'f: el volcado modifica la base'
+fi
 : > "$EVENTS"
 deploy
 [[ $(current) != "$active" ]] || fail 'f: no se activó la migración correcta'
@@ -161,12 +182,13 @@ log=$(log_from_error "$output")
 grep -Fq 'mysqldump: error de prueba' "$log" || fail 'S14: error de mysqldump ausente'
 if grep -Fq 'backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
 
-printf '%s\n' 'export DATABASE_URL = "mysql://user:app%40secret@localhost/test"' > "$DEPLOY_ROOT/shared/.env"
+printf '%s\n' 'export DATABASE_URL = "mysql://user:app%40secret@localhost/test"' \
+  'MIGRATION_DATABASE_URL=mysql://migration:migration%40secret@localhost/test' > "$DEPLOY_ROOT/shared/.env"
 if output=$(FAIL_MIGRATE=1 FAIL_RESTORE=1 deploy 2>&1); then fail 'S14: se aceptó una restauración fallida'; fi
 log=$(log_from_error "$output")
 grep -Fq 'migrate: error de prueba' "$log" && grep -Fq 'mysql: error de restauración de prueba' "$log" ||
   fail 'S14: error de migración o restauración ausente'
-if grep -Eq 'app%40secret|app@secret|backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
+if grep -Eq 'app%40secret|app@secret|migration@secret|backup-secret' "$log"; then fail 'S14: contraseña en el log'; fi
 if output=$(deploy ref-inexistente 2>&1); then fail 'S14: se aceptó una ref inexistente'; fi
 log=$(log_from_error "$output")
 grep -Fq 'ref-inexistente' "$log" || fail 'S14: error de git fetch ausente'

@@ -3,12 +3,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import mariadb from "mariadb";
 import request from "supertest";
 import { expect, test, vi } from "vitest";
 import { APP_NAME } from "@finance-manager/core";
 import { createApp } from "./app.js";
 import { readConfig } from "./config.js";
+import * as database from "./database.js";
 
 const version = "m002-test";
 const app = createApp(readConfig({ APP_VERSION: version }));
@@ -97,10 +97,10 @@ test("S5: health hides database errors and responds within three seconds", async
 test("S11: concurrent health requests share a probe and cache it for 10 seconds", async () => {
   const clock = vi.spyOn(performance, "now").mockReturnValue(0);
   const probe = vi
-    .spyOn(mariadb, "createConnection")
+    .spyOn(database, "checkDatabase")
     .mockImplementation(async () => {
       await setTimeout(50);
-      throw new Error("Database unavailable");
+      return "unavailable";
     });
   const health = request(
     createApp(
