@@ -1,10 +1,27 @@
 # FinanceManager
 
-Finanzas personales con Claude como interfaz conversacional, respaldadas por un libro contable auditable.
+FinanceManager es un servidor MCP remoto (Model Context Protocol) que permite a Claude.ai registrar y consultar finanzas personales conversando. Mantiene un libro contable auditable de partida doble y multimoneda (BOB/USD). Está construido con Node.js 22, TypeScript, Express y MariaDB 10.6, con OAuth 2.1 y un dashboard web en React. Se aloja en cPanel con Passenger; el servidor no llama a ninguna API de IA, así que la aplicación no añade coste de IA.
 
-## Qué resuelve
+## Funcionalidades
 
-FinanceManager registra ingresos, gastos, transferencias, préstamos y saldos en varias monedas. Claude.ai se conecta como interfaz principal mediante MCP remoto y OAuth; la aplicación no incluye IA ni llama a una API de IA, así que no añade coste de API.
+- Registra gastos, ingresos, transferencias, cargas por lotes, conciliaciones y valuación patrimonial.
+- Organiza las finanzas con cuentas, categorías, etiquetas y campos personalizados.
+- Gestiona préstamos con interés simple y pagos aplicados primero a intereses.
+- Registra la cotización oficial USD/BOB consultada a través de CUCU, un tercero sin afiliación al BCB, o permite anotarla manualmente.
+- Permite consultar y deshacer operaciones, además de consultar datos mediante SQL de solo lectura.
+- Ofrece un dashboard de resumen, movimientos, informes y actividad de Claude.
+- Protege el acceso y permite crear copias cifradas con guías de despliegue y recuperación.
+
+## Stack
+
+| Capa          | Tecnología                                                           |
+| ------------- | -------------------------------------------------------------------- |
+| Servidor      | Node.js 22, TypeScript y Express                                     |
+| Datos         | MariaDB 10.6; libro de partida doble y base separada de solo lectura |
+| Web           | React y Vite                                                         |
+| Autenticación | OAuth 2.1, contraseña y TOTP; sesión web con contraseña              |
+| Despliegue    | cPanel y Passenger                                                   |
+| Pruebas       | Vitest y suites Bash                                                 |
 
 ## Demostración
 
@@ -26,32 +43,39 @@ Conversación ficticia; los importes y personas son de ejemplo:
 >
 > **Claude:** Gasto revertido. La transferencia y el préstamo siguen registrados.
 
+## Arquitectura
+
+```mermaid
+flowchart LR
+    Claude["Claude.ai"] --> OAuth["OAuth 2.1"] --> MCP["/mcp"]
+    Browser["Navegador"] --> Session["Sesión web"] --> API["/api"] --> Dashboard["Dashboard React"]
+    MCP --> Server["Servidor Express"]
+    API --> Server
+    Server --> Ledger["Ledger de partida doble"]
+    Ledger --> Primary[("MariaDB principal")]
+    Ledger --> ReadOnly[("MariaDB de solo lectura")]
+    Server --> CUCU["API de tipo de cambio (CUCU)"]
+```
+
+## Uso
+
 ### Préstamos en Claude
 
 - Usa `registrar_prestamo` para dar de alta el préstamo. Si es sin interés, indica tasa 0 y el período. Si el dinero ya se movió y quedó registrado en el historial, indica `sin_movimiento_de_caja`.
 - Usa `consultar_prestamos` para ver el saldo a una fecha, el desglose y los abonos, o para listar por persona o estado con totales separados por moneda.
 - Usa `abonar_prestamo` para registrar un pago. Cubre primero los intereses pendientes y luego el capital. Para corregirlo, ejecuta `deshacer_operacion` con el ID devuelto. Si hay abonos posteriores de ese préstamo, deshaz primero los más recientes.
 
-## Incremento 1
+### Dashboard v1
 
-- Libro de partida doble con cuentas, categorías, etiquetas y campos personalizados.
-- Gastos, ingresos, transferencias multimoneda, carga por lotes, conciliación y valuación patrimonial.
-- Préstamos hechos y recibidos con interés simple y abonos aplicados primero a intereses.
-- Herramientas MCP para registrar, consultar y deshacer operaciones; consulta SQL limitada a vistas financieras de solo lectura.
-- `actualizar_tipo_de_cambio_oficial` consulta el tipo oficial USD/BOB vigente a través de CUCU, un tercero sin afiliación al BCB, y lo registra si la fecha aún no tiene una cotización. Para fechas pasadas o si falla la consulta, usa `registrar_tipo_de_cambio` con la fuente y el enlace.
-- Autenticación OAuth 2.1 con contraseña y TOTP.
-- Copias cifradas y guías de despliegue y recuperación.
+Abre la raíz del sitio e inicia sesión con la contraseña creada mediante `npm run auth:setup`. El dashboard usa solo contraseña por decisión de Mateo. Claude conserva el flujo OAuth con TOTP.
 
-## Arquitectura
+- **Resumen** muestra patrimonio, efectivo y cuentas de subtipo banco, ingresos y gastos frente al mes anterior, principales categorías y los últimos movimientos del mes elegido. El disponible se conserva por moneda. Las categorías se ordenan por su valor conocido en Bs al cierre. Si falta una cotización para un saldo, el patrimonio se muestra como parcial.
+- **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
+- **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
 
-```mermaid
-flowchart LR
-    C["Claude.ai"] --> O["OAuth 2.1 + TOTP"]
-    O --> M["/mcp"]
-    M --> L["ledger"]
-    L --> D[("MariaDB principal")]
-    L --> R[("MariaDB _ro: vistas de lectura")]
-```
+La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El bloqueo por intentos se comparte con OAuth y el inicio de sesión queda en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. Para revocar todas las sesiones web y credenciales OAuth activas, ejecuta `npm run auth:tokens -- revoke-all`.
+
+Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía `/api` al puerto de Express. Con Express sirviendo el build, usa el origen de Express.
 
 ## Decisiones técnicas
 
@@ -65,7 +89,7 @@ flowchart LR
 
 ## Calidad
 
-La última ejecución documentada en M-008B reportó **46 pruebas unitarias/HTTP, 115 de integración y tres suites Bash**; también pasaron build, lint, typecheck y formato. La integración usó MariaDB 10.6.28. Comandos: `npm test`, `npm run test:integration`, `bash src/deploy/deploy.test.sh`, `bash src/deploy/backup.test.sh` y `bash src/deploy/guide.test.sh`.
+La última ejecución documentada en M-017 reportó **51 pruebas unitarias/HTTP, 140 de integración y tres suites Bash**; también pasaron build, lint, typecheck y formato. La integración usó MariaDB 10.6.28. Comandos: `npm test`, `npm run test:integration`, `bash src/deploy/deploy.test.sh`, `bash src/deploy/backup.test.sh` y `bash src/deploy/guide.test.sh`.
 
 ## Puesta en marcha local
 
@@ -114,22 +138,10 @@ La [guía de despliegue](docs/operacion/despliegue.md) cubre cPanel, Passenger, 
 
 Después del dashboard están previstos presupuestos, movimientos recurrentes y objetivos financieros.
 
-## Dashboard v1
-
-Abre la raíz del sitio e inicia sesión con la contraseña creada mediante `npm run auth:setup`. El dashboard usa solo contraseña por decisión de Mateo. Claude conserva el flujo OAuth con TOTP.
-
-- **Resumen** muestra patrimonio, efectivo y cuentas de subtipo banco, ingresos y gastos frente al mes anterior, principales categorías y los últimos movimientos del mes elegido. El disponible se conserva por moneda. Las categorías se ordenan por su valor conocido en Bs al cierre. Si falta una cotización para un saldo, el patrimonio se muestra como parcial.
-- **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
-- **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
-
-La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El bloqueo por intentos se comparte con OAuth y el inicio de sesión queda en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. Para revocar todas las sesiones web y credenciales OAuth activas, ejecuta `npm run auth:tokens -- revoke-all`.
-
-Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía `/api` al puerto de Express. Con Express sirviendo el build, usa el origen de Express.
-
 ## Licencia
 
 Pendiente.
 
 ## English summary
 
-FinanceManager is a personal finance ledger controlled through Claude.ai over remote MCP and OAuth. It supports double-entry, multiple currencies, reversible operations, simple-interest loans, and encrypted backups. The web dashboard supports read-only views and operation reversal.
+FinanceManager is a remote MCP (Model Context Protocol) server that lets Claude.ai record and query personal finances through conversation. It maintains an auditable, double-entry, multi-currency (BOB/USD) ledger, with a React dashboard, and is built with Node.js 22, TypeScript, Express, and MariaDB 10.6. It uses OAuth 2.1 and runs on cPanel with Passenger; the server calls no AI APIs, so the application adds no AI API cost.
