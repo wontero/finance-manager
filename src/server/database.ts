@@ -17,6 +17,7 @@ export function createDatabase(options: PoolOptions) {
     supportBigNumbers: true,
     bigNumberStrings: true,
     decimalNumbers: false,
+    jsonStrings: true,
     dateStrings: true,
     timezone: "Z",
     connectionLimit: options.connectionLimit ?? 5,
