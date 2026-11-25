@@ -8,6 +8,7 @@ trap 'rm -rf -- "$fixture"' EXIT
 export DEPLOY_ROOT="$fixture/app" DEPLOY_REPO_URL="$fixture/source"
 export DEPLOY_NODE_BIN="$fixture/bin" DEPLOY_HEALTH_ATTEMPTS=2
 export DEPLOY_HEALTH_DELAY=0 DEPLOY_HEALTH_URL=http://localhost/health
+unset DEPLOY_HEALTH_USER_AGENT
 export DEPLOY_DB_NAME=finance_test EVENTS="$fixture/events"
 export SCHEMA_OBJECTS="$fixture/schema-objects"
 printf '%s\n' accounts v_accounts > "$SCHEMA_OBJECTS"
@@ -54,6 +55,7 @@ cat > "$DEPLOY_NODE_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo health >> "$EVENTS"
+{ printf '%q ' "$@"; printf '\n'; } >> "$EVENTS.curl"
 [[ ${FAIL_HEALTH:-0} != 1 ]] || exit 22
 release=$(basename "$(readlink "$DEPLOY_ROOT/current")")
 body=${HEALTH_BODY:-'{"db":"ok"}'}
@@ -131,16 +133,40 @@ deploy() { bash "$script" "$@"; }
 current() { readlink "$DEPLOY_ROOT/current"; }
 fail() { echo "FALLA $*" >&2; exit 1; }
 
+assert_health_user_agent() {
+  local expected call
+  local -a calls
+  expected=$(printf '%q %q ' --user-agent "$1")
+  mapfile -t calls < "$EVENTS.curl"
+  [[ ${#calls[@]} == "$2" ]] || fail 'M-014: cantidad incorrecta de intentos de salud'
+  for call in "${calls[@]}"; do
+    [[ " $call" == *" $expected"* ]] || fail "M-014: falta $expected en $call"
+  done
+}
+
 # The first release has no target to restore on failure.
 if FAIL_HEALTH=1 deploy; then fail 'salud inicial aceptada'; fi
 [[ ! -e "$DEPLOY_ROOT/current" && ! -L "$DEPLOY_ROOT/current" ]] || fail 'current inicial quedó enlazado'
+assert_health_user_agent 'FinanceManager-deploy/1.0' "$DEPLOY_HEALTH_ATTEMPTS"
+echo 'PASA M-014 S1'
+
+for invalid in '' $'FinanceManager\nQA' $'FinanceManager\rQA'; do
+  if output=$(DEPLOY_ROOT="$fixture/invalid" DEPLOY_HEALTH_USER_AGENT="$invalid" deploy 2>&1); then
+    fail 'M-014 S2: se aceptó un User-Agent inválido'
+  fi
+  [[ $output == *'DEPLOY_HEALTH_USER_AGENT no puede estar vacío ni contener saltos de línea'* &&
+     ! -e "$fixture/invalid" ]] || fail 'M-014 S2: faltó el diagnóstico o se inició el despliegue'
+done
 : > "$EVENTS"
+: > "$EVENTS.curl"
 deploy --bootstrap
 [[ ! -s "$EVENTS" ]] || fail 'bootstrap consultó la URL antes de registrar la app'
 first=$(current)
 [[ -d "$first" && -f "$first/tmp/restart.txt" ]] || fail 'a: no se activó la release'
 [[ $(readlink "$first/.env") == "$DEPLOY_ROOT/shared/.env" ]] || fail 'a: falta enlace a .env'
-deploy
+DEPLOY_HEALTH_USER_AGENT='FinanceManager QA/2.0' deploy
+assert_health_user_agent 'FinanceManager QA/2.0' 1
+echo 'PASA M-014 S2'
 second=$(current)
 [[ $first != "$second" && -f "$second/tmp/restart.txt" ]] || fail 'a: despliegue normal'
 [[ $(cat "$EVENTS") == health ]] || fail 'a: no se comprobó la salud'

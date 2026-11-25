@@ -4,6 +4,10 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ## [Unreleased]
 
+### Corregido
+
+- La comprobación de salud del despliegue usa un User-Agent propio para evitar el rechazo de ModSecurity al User-Agent por defecto de `curl`.
+
 ## [0.1.0] - sin fecha
 
 ### Añadido

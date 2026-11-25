@@ -177,7 +177,7 @@ Si usas `nohup`, sigue el ejemplo del paso 7 con `bash "$bootstrap" --bootstrap`
 3. En la terminal, ejecuta estos comandos y compara el valor de `X-Finance-Release` con el nombre de la release que devuelve el segundo comando.
 
    ```bash
-   curl -fsSi https://finanzasmateo.ingetech.biz/health
+   curl -fsSi -A "FinanceManager-deploy/1.0" https://finanzasmateo.ingetech.biz/health
    basename "$(readlink "$app_dir/current")"
    ```
 
@@ -219,8 +219,8 @@ Usa datos ficticios con sufijo «P3» y conserva las fechas al repetir las consu
 El conector usa Streamable HTTP sin sesiones y responde con JSON. Una petición `GET /mcp` devuelve 405. Una petición `POST /mcp` sin token devuelve 401. La cabecera `WWW-Authenticate` apunta a `/.well-known/oauth-protected-resource/mcp`. [Transporte Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
 ```bash
-curl -si -X POST https://finanzasmateo.ingetech.biz/mcp
-curl -fsS https://finanzasmateo.ingetech.biz/.well-known/oauth-protected-resource/mcp
+curl -si -A "FinanceManager-deploy/1.0" -X POST https://finanzasmateo.ingetech.biz/mcp
+curl -fsS -A "FinanceManager-deploy/1.0" https://finanzasmateo.ingetech.biz/.well-known/oauth-protected-resource/mcp
 ```
 
 Para gestionar el acceso desde la terminal del servidor, entra en `current` y usa los siguientes comandos. La lista muestra identificadores, tipo, cliente y vencimiento. Sustituye `123` por un identificador de la lista. Revocar un token revoca su familia. Para desconectar a todos los clientes, usa `revoke-all`. Un nuevo alta con `auth:setup` reemplaza la contraseña y el TOTP y revoca todos los tokens.
@@ -335,7 +335,7 @@ Para volver a la release anterior, ejecuta `bash "$app_dir/current/src/deploy/de
 
 Si se corta SSH, vuelve a conectarte y recupera la sesión con `tmux attach -t finanzas` o `screen -r finanzas`. Con `nohup`, revisa el PID que anotaste con `ps -p PID` y lee el log indicado. Espera a que termine antes de reintentar. Si el proceso ya terminó, compara `readlink "$app_dir/current"` y `readlink "$app_dir/shared/previous"` con la cabecera y el JSON de `/health`. Si el corte ocurrió durante una migración, verifica su resultado y la copia en `shared/backups` antes de repetir el despliegue o restaurar la base.
 
-Puedes cambiar las rutas con `DEPLOY_ROOT`, `DEPLOY_RELEASES_DIR`, `DEPLOY_SHARED_DIR` y `DEPLOY_REPO_DIR`. Usa `DEPLOY_REPO_URL` si cambia el origen, `DEPLOY_NODE_BIN` si Node 22 está en otro directorio y `DEPLOY_HEALTH_URL` si cambia la URL de salud. Los reintentos usan `DEPLOY_HEALTH_ATTEMPTS` (10) y `DEPLOY_HEALTH_DELAY` (3 segundos).
+Puedes cambiar las rutas con `DEPLOY_ROOT`, `DEPLOY_RELEASES_DIR`, `DEPLOY_SHARED_DIR` y `DEPLOY_REPO_DIR`. Usa `DEPLOY_REPO_URL` si cambia el origen, `DEPLOY_NODE_BIN` si Node 22 está en otro directorio y `DEPLOY_HEALTH_URL` si cambia la URL de salud. `DEPLOY_HEALTH_USER_AGENT` permite cambiar el User-Agent de la comprobación, cuyo valor por defecto es `FinanceManager-deploy/1.0`. El valor debe ser no vacío y de una sola línea. Los reintentos usan `DEPLOY_HEALTH_ATTEMPTS` (10) y `DEPLOY_HEALTH_DELAY` (3 segundos).
 
 ### Copia y restauración de una migración fallida
 
@@ -350,6 +350,7 @@ Ensaya la copia y restauración en una base desechable y detén las escrituras y
 ## Si algo falla
 
 - **HTTPS o 404**. Comprueba DNS, AutoSSL, el dominio de Application Manager y la ruta literal de la app.
+- **406 Not Acceptable con HTML de Apache**. ModSecurity está bloqueando el User-Agent por defecto de `curl`. Usa `-A "FinanceManager-deploy/1.0"` en las comprobaciones manuales.
 - **500 o cabecera de release antigua**. Revisa `~/apps/finanzasmateo/shared/logs/` desde **File Manager**, o `~/apps/finanzasmateo/current/logs/` mientras haya una release activa. Comprueba la versión de Node seleccionada para Passenger y que `current` apunte a la release compilada. Para pedir otro reinicio, toca `current/tmp/restart.txt`. Los errores recientes de Apache aparecen en **Metrics → Errors**. [Logs de Application Manager](https://docs.cpanel.net/cpanel/software/application-manager/#log-files), [Errores de Apache en cPanel](https://docs.cpanel.net/cpanel/metrics/errors/)
 - **MariaDB no disponible**. Revisa los nombres completos, permisos de la base y codificación de la contraseña en `shared/.env`. Toca `current/tmp/restart.txt` después de guardar cambios.
 - **Descarga, copia, migración o restauración fallida**. Abre el archivo `shared/logs/deploy-<release>.log` que indica el error. El archivo tiene permisos 600 y contiene el diagnóstico con las credenciales de configuración filtradas.

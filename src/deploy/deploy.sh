@@ -86,6 +86,7 @@ shared=$(realpath -m "${DEPLOY_SHARED_DIR:-$root/shared}")
 repo=$(realpath -m "${DEPLOY_REPO_DIR:-$root/repo}")
 repo_url=${DEPLOY_REPO_URL:-git@github.com:wontero/finance-manager.git}
 health_url=${DEPLOY_HEALTH_URL:-https://finanzasmateo.ingetech.biz/health}
+health_user_agent=${DEPLOY_HEALTH_USER_AGENT-FinanceManager-deploy/1.0}
 health_attempts=${DEPLOY_HEALTH_ATTEMPTS:-10}
 health_delay=${DEPLOY_HEALTH_DELAY:-3}
 current="$root/current"
@@ -103,6 +104,8 @@ case "$mode" in
 esac
 [[ $health_attempts =~ ^[1-9][0-9]*$ && $health_delay =~ ^(0|[1-9][0-9]*)$ ]] ||
   fail 'Configura DEPLOY_HEALTH_ATTEMPTS (>0) y DEPLOY_HEALTH_DELAY (>=0) como enteros.'
+[[ -n $health_user_agent && $health_user_agent != *[$'\r\n']* ]] ||
+  fail 'DEPLOY_HEALTH_USER_AGENT no puede estar vacío ni contener saltos de línea.'
 
 reject_active_bootstrap() {
   [[ $mode != --bootstrap || ! -L $current || ! -d $current ]] ||
@@ -203,7 +206,8 @@ trap cleanup EXIT
 check_health() {
   local release=${1##*/} attempt
   for ((attempt = 1; attempt <= health_attempts; attempt++)); do
-    if curl --fail --silent --max-time 4 --include --suppress-connect-headers "$health_url" |
+    if curl --fail --silent --max-time 4 --include --suppress-connect-headers \
+      --user-agent "$health_user_agent" "$health_url" |
       node -e '
         const [release, requireDb] = process.argv.slice(1);
         let response = require("node:fs").readFileSync(0, "utf8");

@@ -11,7 +11,7 @@ for step in 'gpg --version' 'rclone version' '~/bin' '@@log_bin_trust_function_c
   'rclone config' 'rclone authorize' 'backup.passphrase' 'gestor de contraseñas' \
   'CRON_TZ=America/La_Paz' 'MAILTO=' '30 3 * * *' 'flock' 'backup.sh" verify' \
   'backup.sh" restore' 'Delete Database' 'auth:unlock' 'auth:tokens -- revoke' '--rollback' \
-  'recuperacion.md'; do
+  'recuperacion.md' 'DEPLOY_HEALTH_USER_AGENT' '406 Not Acceptable'; do
   grep -Fq -- "$step" "$guide" || { echo "S9: falta $step" >&2; exit 1; }
 done
 for scenario in 'pierde el VPS' 'pierde la frase' 'despliegue rompe la base'; do
@@ -23,3 +23,12 @@ if grep -Eq 'BEGIN [A-Z ]*PRIVATE KEY|gh[pousr]_[[:alnum:]]{20,}|github_pat_[[:a
   exit 1
 fi
 echo 'PASA M-007 S9'
+
+probes=$(grep -E '^[[:space:]]*curl[[:space:]].*finanzasmateo\.ingetech\.biz' "$guide")
+while IFS= read -r probe; do
+  [[ $probe == *' -A "FinanceManager-deploy/1.0" '* ]] || {
+    echo "M-014 S4: falta el User-Agent en $probe" >&2
+    exit 1
+  }
+done <<< "$probes"
+echo 'PASA M-014 S4'
