@@ -44,7 +44,9 @@ sequenceDiagram
     F-->>C: Respuesta MCP
 ```
 
-Los códigos duran cinco minutos y los tokens de acceso duran una hora, hasta el límite de vida de su familia. Cada refresco rota el token, con una ventana deslizante de 30 días y un máximo de 90 días desde la emisión inicial. Reutilizar un código consumido con su verificador o un refresco rotado revoca la familia. MariaDB guarda hashes SHA-256 de tokens opacos de 32 bytes. La contraseña se deriva con scrypt y una sal individual. El secreto TOTP se cifra con AES-256-GCM y una clave de entorno.
+Los códigos duran cinco minutos y los tokens de acceso duran una hora, hasta el límite de vida de su familia. Cada refresco rota el token, con una ventana deslizante de 30 días y un máximo de 90 días desde la emisión inicial. Si se vuelve a presentar un código consumido con el verificador PKCE correcto, se revoca la familia. El SDK rechaza antes las peticiones sin verificador válido. Reutilizar un refresco rotado también revoca su familia. MariaDB guarda hashes SHA-256 de tokens opacos de 32 bytes. La contraseña se deriva con scrypt y una sal individual. El secreto TOTP se cifra con AES-256-GCM y una clave de entorno.
+
+La emisión y el refresco purgan los códigos vencidos hace más de un día, los intentos de más de 24 horas y los clientes de más de 30 días sin tokens vigentes. Se conserva el registro hash de un código consumido mientras su familia tenga tokens vigentes para poder detectar el reuso. Los eventos de autenticación se conservan.
 
 El formulario usa un token CSRF y una cookie ligados a la solicitud. MariaDB serializa los cambios de autenticación y cuenta los intentos fallidos por IP y globalmente. Los eventos registran el tipo, resultado, IP, agente truncado, cliente y fecha UTC. Los datos de autenticación quedan en la base principal, fuera de las vistas de consulta. El endpoint OAuth `/revoke` limita al cliente a la familia del token que presenta. Los comandos administrativos se ejecutan en la terminal del servidor.
 

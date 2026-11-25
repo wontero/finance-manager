@@ -39,7 +39,7 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
    READONLY_DATABASE_NAME=ingete7_finanzas_ro
    READONLY_DATABASE_URL=mysql://ingete7_finro:CLAVE_RO_CODIFICADA@localhost:3306/ingete7_finanzas_ro
    PUBLIC_URL=https://finanzasmateo.ingetech.biz
-   TRUST_PROXY=loopback
+   TRUST_PROXY=passenger
    ```
 
    Desde esa misma terminal, genera una clave de 32 bytes para cifrar el secreto TOTP. Ejecuta el comando una vez. Comprueba si la variable existe antes de añadirla, incluso si el archivo ya tiene una configuración de autenticación.
@@ -59,7 +59,9 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
 
    Conserva esta clave junto con los secretos respaldados de la instancia. Si la pierdes, genera una nueva y ejecuta `auth:setup` para dar de alta otro TOTP y revocar los tokens anteriores.
 
-   `TRUST_PROXY=loopback` confía en Apache/Passenger en la interfaz local. Úsalo cuando Apache sea el único punto de entrada y añada al final de `X-Forwarded-For` la IP de su cliente o la entregue como dirección remota. Mantén el backend inaccesible desde Internet. Para Node expuesto directamente, usa `TRUST_PROXY=off`, que ignora la cabecera. Si cambias la topología, comprueba de nuevo la IP efectiva antes de aceptar tráfico.
+   `TRUST_PROXY=passenger` usa la IP validada de `!~Passenger-Client-Address` e ignora `X-Forwarded-For` para los limitadores. Usa este modo solo cuando Apache/Passenger sea el único punto de entrada al proceso Node. En la primera petición de cada proceso, el log muestra el tipo de socket, su dirección remota, la presencia de ambas cabeceras y la IP elegida. En P3, confirma que la IP coincide con la del cliente. Si Passenger no entrega una IP válida, el login usa solo el límite global y el proceso deja un aviso. [Cabeceras seguras de Passenger](https://www.phusionpassenger.com/library/indepth/nodejs/secure_http_headers.html)
+
+   `TRUST_PROXY=loopback` sigue disponible para un proxy local de confianza que añade al final de `X-Forwarded-For` la IP del cliente. Para Node expuesto directamente, usa `TRUST_PROXY=off`.
 
    `OAUTH_ALLOWED_REDIRECT_URIS` autoriza por defecto `https://claude.ai/api/mcp/auth_callback` y `https://claude.com/api/mcp/auth_callback`. Para añadir otra, fija la lista completa de URLs HTTPS exactas separadas por comas en `shared/.env` y reinicia Passenger. Incluye los callbacks anteriores si deben seguir funcionando.
 
@@ -163,7 +165,7 @@ cPanel busca `app.js` en la raíz de la aplicación y el cargador documentado de
 
 2. En Claude.ai, abre **Customize → Connectors → + Add → Add custom connector**. En una organización, usa **Organization settings → Connectors** con el rol que permite añadir conectores.
 3. Escribe **Finance Manager** y la URL `https://finanzasmateo.ingetech.biz/mcp`. Selecciona **Sign in now** y **Register automatically** para el cliente OAuth. Continúa hasta la pantalla de Finance Manager.
-4. Introduce la contraseña y el código de seis dígitos. Confirma que el consentimiento muestra el cliente y el host de retorno esperado de Claude, y autoriza el acceso.
+4. Introduce la contraseña y el código de seis dígitos. Confirma el cliente, la fecha de registro en hora de Bolivia y el host de retorno. Autoriza solo si acabas de iniciar la conexión desde tu Claude.
 5. En un chat nuevo de la web, abre **+ → Connectors**, activa **Finance Manager** y pide «Ejecuta la herramienta ping de Finance Manager y muestra la respuesta». Verifica `pong`, la versión y la hora ISO. Repite la prueba en la app móvil con la misma cuenta y espacio de trabajo. [Configurar conectores personalizados](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 
 El conector usa Streamable HTTP sin sesiones y responde con JSON. Una petición `GET /mcp` devuelve 405. Una petición `POST /mcp` sin token devuelve 401. La cabecera `WWW-Authenticate` apunta a `/.well-known/oauth-protected-resource/mcp`. [Transporte Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
@@ -180,6 +182,8 @@ npm run auth:tokens -- list
 npm run auth:tokens -- revoke 123
 npm run auth:tokens -- revoke-all
 ```
+
+Veinte fallos en una hora pueden bloquear temporalmente nuevos inicios de sesión desde cualquier IP. Quien provoque esos fallos puede impedir el login. Los tokens vigentes siguen funcionando. Ejecuta `npm run auth:unlock` en `current` para borrar los intentos vigentes. El comando deja un evento `login/success` sin cliente asociado. Los límites HTTP por IP de cada proceso conservan su ventana.
 
 ## 7. Despliega cambios y usa rollback
 

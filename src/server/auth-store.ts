@@ -26,7 +26,12 @@ export const digest = (secret: string) =>
 
 export function clientIp(address: string | undefined) {
   const ip = address?.replace(/^::ffff:(?=\d+\.)/i, "");
-  return ip && isIP(ip) ? ip.toLowerCase() : null;
+  if (!ip) return null;
+  const version = isIP(ip);
+  if (version === 4) return ip;
+  return version === 6 && !ip.includes("%")
+    ? new URL(`http://[${ip}]`).hostname.slice(1, -1)
+    : null;
 }
 
 // Serialize changes to credentials, login attempts, codes and token families.
@@ -56,6 +61,69 @@ export function authEvent(
   return sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id)
     VALUES (${type}, ${outcome}, ${context?.ip ?? null}, ${context?.agent ?? null}, ${clientId})
   `.execute(db);
+}
+
+export async function loginBlocked(db: AuthDb, ip: string | null) {
+  const {
+    rows: [counts],
+  } = await sql<{ global_count: string; ip_count: string | null }>`
+    SELECT COUNT(*) AS global_count,
+      SUM(ip = ${ip} AND created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)) AS ip_count
+    FROM auth_attempts WHERE created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
+  `.execute(db);
+  return Number(counts.ip_count) >= 5 || Number(counts.global_count) >= 20;
+}
+
+export function recordBlockedLogin(db: AuthDb, clientId: string) {
+  const context = authContext.getStore();
+  const ip = context?.ip ?? null;
+  // Different Passenger processes share this audit guard without locking auth_users.
+  const lock = sql`CONCAT('fm:login:', LEFT(SHA2(CONCAT(DATABASE(), '/', ${ip ?? ""}), 256), 48))`;
+  return db.connection().execute(async (connection) => {
+    const {
+      rows: [row],
+    } = await sql<{
+      acquired: number | string | null;
+    }>`SELECT GET_LOCK(${lock}, 0) AS acquired`.execute(connection);
+    if (Number(row.acquired) !== 1) return;
+    try {
+      await sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id)
+        SELECT 'login', 'blocked', ${ip}, ${context?.agent ?? null}, ${clientId}
+        FROM DUAL WHERE NOT EXISTS (
+          SELECT 1 FROM auth_events WHERE event_type = 'login' AND outcome = 'blocked' AND ip <=> ${ip}
+            AND created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)
+        )`.execute(connection);
+    } finally {
+      await sql`SELECT RELEASE_LOCK(${lock})`.execute(connection);
+    }
+  });
+}
+
+export async function purgeAuth(db: AuthDb) {
+  const live = sql`t.revoked_at IS NULL AND t.expires_at > UTC_TIMESTAMP(3)
+    AND t.family_expires_at > UTC_TIMESTAMP(3)`;
+  await sql`DELETE FROM oauth_authorization_codes
+    WHERE expires_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY)
+      AND (phase <> 'used' OR NOT EXISTS (
+        SELECT 1 FROM oauth_tokens t WHERE t.family_id = oauth_authorization_codes.id AND ${live}
+      ))`.execute(db);
+  await sql`DELETE FROM auth_attempts WHERE created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 24 HOUR)`.execute(
+    db,
+  );
+
+  const idle = sql`c.created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 30 DAY)
+    AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = c.id AND ${live})`;
+  const { rows: clients } = await sql<{
+    id: string;
+  }>`SELECT c.id FROM oauth_clients c WHERE ${idle} FOR UPDATE`.execute(db);
+  if (!clients.length) return;
+  const ids = sql.join(clients.map(({ id }) => id));
+  // Both child tables restrict deletion of their OAuth client.
+  await sql`DELETE FROM oauth_authorization_codes WHERE client_id IN (${ids})`.execute(
+    db,
+  );
+  await sql`DELETE FROM oauth_tokens WHERE client_id IN (${ids})`.execute(db);
+  await sql`DELETE FROM oauth_clients WHERE id IN (${ids})`.execute(db);
 }
 
 export function revokeFamily(db: AuthDb, family: Buffer) {

@@ -97,8 +97,8 @@ const configSchema = z.object({
     .transform((value) => Buffer.from(value, "base64"))
     .optional(),
   TRUST_PROXY: z
-    .enum(["loopback", "off"], {
-      error: "TRUST_PROXY debe ser loopback u off",
+    .enum(["passenger", "loopback", "off"], {
+      error: "TRUST_PROXY debe ser passenger, loopback u off",
     })
     .default("off"),
   PORT: z
@@ -171,10 +171,7 @@ export function readConfig(env: NodeJS.ProcessEnv) {
       encryptionKey: config.TOTP_ENCRYPTION_KEY,
       secureCookies:
         config.NODE_ENV === "production" || issuer.protocol === "https:",
-      trustProxy:
-        config.TRUST_PROXY === "loopback"
-          ? ("loopback" as const)
-          : (false as const),
+      trustProxy: config.TRUST_PROXY === "off" ? false : config.TRUST_PROXY,
     },
   };
 }

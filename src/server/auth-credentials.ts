@@ -114,10 +114,22 @@ export async function checkCredentials(
   const passwordMatches = timingSafeEqual(hash, user.password_hash);
   const timestamp = Date.now();
   const clockStep = Math.floor(timestamp / 30_000);
-  const delta = authenticator(secret).validate({ token, timestamp, window: 1 });
-  const step = delta === null ? -1 : clockStep + delta;
+  const validFormat = /^[0-9]{6}$/.test(token);
+  const otp = authenticator(secret);
+  const offsets = [0, -1, 1];
+  // OTPAuth stops at the first match, so validate each step independently.
+  const matches = offsets.map((offset) =>
+    otp.validate({
+      token: validFormat ? token : "000000",
+      timestamp: timestamp + offset * 30_000,
+      window: 0,
+    }),
+  );
+  const match = matches.indexOf(0);
+  const step = match === -1 ? -1 : clockStep + offsets[match];
   if (
     passwordMatches &&
+    validFormat &&
     step >= 0 &&
     (user.last_totp_step === null || step > Number(user.last_totp_step))
   )

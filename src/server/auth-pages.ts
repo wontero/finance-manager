@@ -1,14 +1,20 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import express, { type Request, type Response } from "express";
+import {
+  rateLimit,
+  type Options as RateLimitOptions,
+} from "express-rate-limit";
 import { sql } from "kysely";
 import { checkCredentials } from "./auth-credentials.js";
 import type { AuthConfig } from "./auth-provider.js";
 import {
+  authContext,
   authEvent,
   authTransaction,
-  clientIp,
   digest,
+  loginBlocked,
   newToken,
+  recordBlockedLogin,
   type AuthDb,
 } from "./auth-store.js";
 
@@ -28,6 +34,15 @@ button[value=deny]{background:white;color:#22503e}
 [role=alert]{color:#912323}
 `;
 const styleHash = createHash("sha256").update(stylesheet).digest("base64");
+const clientDate = new Intl.DateTimeFormat("es-BO", {
+  timeZone: "America/La_Paz",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 type AuthRequest = {
   id: Buffer;
@@ -37,6 +52,7 @@ type AuthRequest = {
   resource: string;
   oauth_state: string | null;
   metadata: string;
+  client_created_at: string;
 };
 
 function escapeHtml(value: string) {
@@ -117,6 +133,9 @@ function renderConsent(
   const metadata: { client_name?: string } = JSON.parse(item.metadata);
   const name = escapeHtml(metadata.client_name || "Este cliente");
   const host = escapeHtml(new URL(item.redirect_uri).host);
+  const registered = escapeHtml(
+    clientDate.format(new Date(item.client_created_at.replace(" ", "T") + "Z")),
+  );
   response.cookie(cookieName, browser, {
     ...cookieOptions(config),
     maxAge: 5 * 60_000,
@@ -125,6 +144,8 @@ function renderConsent(
     response,
     `${name} quiere acceder a tus finanzas`,
     `
+    <p><strong>Autoriza solo si acabas de iniciar la conexión desde tu Claude</strong>.</p>
+    <p>Cliente registrado el ${registered} (hora de Bolivia).</p>
     <p>Si autorizas el acceso, volverás a <strong>${host}</strong>.</p>
     <form action="/authorize/consent" method="post">
       <input type="hidden" name="csrf" value="${csrf}">
@@ -159,7 +180,7 @@ async function getForm(
   const {
     rows: [item],
   } = await sql<AuthRequest>`
-    SELECT r.id, r.csrf_hash, r.client_id, r.redirect_uri, r.resource, r.oauth_state, c.metadata
+    SELECT r.id, r.csrf_hash, r.client_id, r.redirect_uri, r.resource, r.oauth_state, c.metadata, c.created_at AS client_created_at
     FROM oauth_authorization_codes r JOIN oauth_clients c ON c.id = r.client_id
     WHERE r.id = ${digest(browser)} AND r.phase = ${phase} AND r.expires_at > UTC_TIMESTAMP(3)
   `.execute(db);
@@ -174,41 +195,63 @@ async function getForm(
 
 export function authorizationForms(
   config: AuthConfig,
+  ipOptions: Pick<RateLimitOptions, "skip" | "keyGenerator">,
   database: AuthDb | undefined,
 ) {
   const router = express.Router();
+  for (const path of ["/login", "/consent"]) {
+    router.post(
+      path,
+      rateLimit({
+        ...ipOptions,
+        windowMs: 15 * 60_000,
+        limit: 20,
+        standardHeaders: "draft-6",
+        legacyHeaders: false,
+        handler: (_request, response) => {
+          page(
+            response,
+            "Demasiadas solicitudes",
+            "<p>Vuelve a intentarlo más tarde.</p>",
+            429,
+          );
+        },
+      }),
+    );
+  }
   router.use(
     express.urlencoded({ extended: false, limit: "8kb", parameterLimit: 8 }),
   );
   router.post("/login", async (request, response) => {
     const form = readForm(request);
-    if (!form)
-      return page(
+    const invalidForm = () =>
+      page(
         response,
         "Solicitud inválida",
         "<p>Vuelve a iniciar la autorización.</p>",
         403,
       );
+    if (!form) return invalidForm();
     if (!database)
       return renderLogin(response, config, form.browser, form.csrf, 503);
-    const ip = clientIp(request.ip);
+    const original = await getForm(
+      database,
+      config,
+      "login",
+      form.browser,
+      form.csrf,
+    );
+    if (!original) return invalidForm();
+    const ip = authContext.getStore()?.ip ?? null;
+    const blocked = async () => {
+      await recordBlockedLogin(database, original.client_id);
+      return renderLogin(response, config, form.browser, form.csrf, 429);
+    };
+    if (await loginBlocked(database, ip)) return blocked();
     const result = await authTransaction(database, async (db, user) => {
       const item = await getForm(db, config, "login", form.browser, form.csrf);
       if (!item) return { status: 403 } as const;
-      const {
-        rows: [counts],
-      } = await sql<{ global_count: string; ip_count: string | null }>`
-        SELECT COUNT(*) AS global_count, SUM(ip = ${ip} AND created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)) AS ip_count
-        FROM auth_attempts WHERE created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
-      `.execute(db);
-      if (
-        !ip ||
-        Number(counts.ip_count) >= 5 ||
-        Number(counts.global_count) >= 20
-      ) {
-        await authEvent(db, "login", "blocked", item.client_id);
-        return { status: 429 } as const;
-      }
+      if (await loginBlocked(db, ip)) return { status: 429 } as const;
       const password: unknown = request.body?.password;
       const token: unknown = request.body?.totp;
       const result = await checkCredentials(
@@ -222,10 +265,9 @@ export function authorizationForms(
       await authEvent(db, "login", result.outcome, item.client_id);
       if (result.outcome === "error") return { status: 503 } as const;
       if (result.outcome === "invalid") {
-        await sql`DELETE FROM auth_attempts WHERE created_at <= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)`.execute(
+        await sql`INSERT INTO auth_attempts (ip) VALUES (${ip ?? ""})`.execute(
           db,
         );
-        await sql`INSERT INTO auth_attempts (ip) VALUES (${ip})`.execute(db);
         return { status: 401 } as const;
       }
       const csrf = newToken();
@@ -238,13 +280,8 @@ export function authorizationForms(
       );
       return { status: 200, item, csrf } as const;
     });
-    if (result.status === 403)
-      return page(
-        response,
-        "Solicitud inválida",
-        "<p>Vuelve a iniciar la autorización.</p>",
-        403,
-      );
+    if (result.status === 403) return invalidForm();
+    if (result.status === 429) return blocked();
     if (result.status !== 200)
       return renderLogin(
         response,
@@ -259,13 +296,20 @@ export function authorizationForms(
   router.post("/consent", async (request, response) => {
     const form = readForm(request);
     const decision: unknown = request.body?.decision;
-    if (!database || !form || (decision !== "allow" && decision !== "deny"))
-      return page(
+    const invalidForm = () =>
+      page(
         response,
         "Solicitud inválida",
         "<p>Vuelve a iniciar la autorización.</p>",
         403,
       );
+    if (
+      !database ||
+      !form ||
+      (decision !== "allow" && decision !== "deny") ||
+      !(await getForm(database, config, "consent", form.browser, form.csrf))
+    )
+      return invalidForm();
     const redirect = await authTransaction(database, async (db) => {
       const item = await getForm(
         db,
@@ -292,13 +336,7 @@ export function authorizationForms(
       }
       return url.href;
     });
-    if (!redirect)
-      return page(
-        response,
-        "Solicitud inválida",
-        "<p>Vuelve a iniciar la autorización.</p>",
-        403,
-      );
+    if (!redirect) return invalidForm();
     response
       .clearCookie(cookieName, cookieOptions(config))
       .redirect(303, redirect);

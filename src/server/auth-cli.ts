@@ -82,6 +82,7 @@ async function manageTokens(db: AuthDb, command: string, id?: string) {
 
 async function main([mode, command, id, ...rest]: string[]) {
   const setup = mode === "setup" && command === undefined;
+  const unlock = mode === "unlock" && command === undefined;
   const tokens =
     mode === "tokens" &&
     (((command === "list" || command === "revoke-all") && id === undefined) ||
@@ -90,9 +91,9 @@ async function main([mode, command, id, ...rest]: string[]) {
         /^[1-9][0-9]{0,19}$/.test(id) &&
         BigInt(id) <= 18_446_744_073_709_551_615n &&
         rest.length === 0));
-  if (!setup && !tokens)
+  if (!setup && !unlock && !tokens)
     throw new UsageError(
-      "Usa npm run auth:setup o npm run auth:tokens -- list|revoke <id>|revoke-all.",
+      "Usa npm run auth:setup, npm run auth:unlock o npm run auth:tokens -- list|revoke <id>|revoke-all.",
     );
   const config = readConfig(process.env);
   if (!config.database?.database)
@@ -102,6 +103,17 @@ async function main([mode, command, id, ...rest]: string[]) {
   const { db } = createDatabase(config.database);
   try {
     if (tokens && command) return await manageTokens(db, command, id);
+    if (unlock) {
+      await authTransaction(db, async (trx) => {
+        await sql`DELETE FROM auth_attempts WHERE created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)`.execute(
+          trx,
+        );
+        // A successful login event without a client denotes an operator unlock.
+        await authEvent(trx, "login", "success");
+      });
+      console.log("Bloqueo de inicio de sesión eliminado.");
+      return;
+    }
     if (!config.auth.encryptionKey)
       throw new UsageError(
         "Configura TOTP_ENCRYPTION_KEY antes de crear el usuario.",

@@ -1,4 +1,5 @@
 import express, { type ErrorRequestHandler, type Express } from "express";
+import { ipKeyGenerator } from "express-rate-limit";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import {
   createOAuthMetadata,
@@ -14,8 +15,19 @@ import {
 import { authorizationForms, authorizationHeaders } from "./auth-pages.js";
 import { authContext, clientIp, type AuthDb } from "./auth-store.js";
 
+let passengerDiagnosed = false;
+let passengerWarned = false;
+
+const authRateLimitIp = {
+  keyGenerator: () => {
+    const ip = authContext.getStore()?.ip;
+    return ip ? ipKeyGenerator(ip) : "global";
+  },
+};
+
 export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
-  app.set("trust proxy", config.trustProxy);
+  const passenger = config.trustProxy === "passenger";
+  app.set("trust proxy", config.trustProxy === "loopback" ? "loopback" : false);
   const provider = new FinanceOAuthProvider(config, db);
   const options = {
     provider,
@@ -29,10 +41,30 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
   const resourceMetadataPath = new URL(resourceMetadataUrl).pathname;
 
   app.use((request, _response, next) => {
+    const address = passenger
+      ? request.get("!~Passenger-Client-Address")
+      : request.ip;
+    const ip = clientIp(address);
+    if (passenger && !passengerDiagnosed) {
+      passengerDiagnosed = true;
+      console.info("Diagnóstico de IP de Passenger", {
+        socket: request.socket.remoteFamily ?? "local",
+        remoteAddress: request.socket.remoteAddress ?? null,
+        passengerHeader: address !== undefined,
+        forwardedForHeader: request.get("X-Forwarded-For") !== undefined,
+        ip,
+      });
+    }
+    if (passenger && !ip && !passengerWarned) {
+      passengerWarned = true;
+      console.warn(
+        "Passenger no entregó una IP válida. El login usa solo el límite global.",
+      );
+    }
     const agent = request.get("User-Agent");
     authContext.run(
       {
-        ip: clientIp(request.ip),
+        ip,
         agent: agent
           ? Array.from(agent.replace(/[\x00-\x1f\x7f]/g, ""))
               .slice(0, 200)
@@ -48,7 +80,14 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
       authorizationHeaders(response, config);
       next();
     },
-    authorizationForms(config, db),
+    authorizationForms(
+      config,
+      {
+        ...authRateLimitIp,
+        skip: () => !authContext.getStore()?.ip,
+      },
+      db,
+    ),
   );
 
   app.post(
@@ -93,7 +132,13 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
   app.use(
     mcpAuthRouter({
       ...options,
-      clientRegistrationOptions: { clientIdGeneration: false },
+      authorizationOptions: { rateLimit: authRateLimitIp },
+      tokenOptions: { rateLimit: authRateLimitIp },
+      revocationOptions: { rateLimit: authRateLimitIp },
+      clientRegistrationOptions: {
+        clientIdGeneration: false,
+        rateLimit: authRateLimitIp,
+      },
     }),
   );
 

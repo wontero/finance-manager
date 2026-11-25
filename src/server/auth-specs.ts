@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import express from "express";
 import { Secret, TOTP } from "otpauth";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import request, { type Response } from "supertest";
@@ -72,20 +73,33 @@ export function authSpecs(
       await database.db.destroy();
       throw error;
     }
-    const http = (encryptionKey = key, production = false) =>
-      request(
-        createApp(
-          readConfig({
-            PUBLIC_URL: publicUrl,
-            APP_VERSION: version,
-            TOTP_ENCRYPTION_KEY: encryptionKey.toString("base64"),
-            NODE_ENV: production ? "production" : "development",
-            TRUST_PROXY: "loopback",
-          }),
-          undefined,
-          database,
-        ),
+    const http = (
+      encryptionKey = key,
+      production = false,
+      trustProxy = "loopback",
+      withoutSocketIp = false,
+    ) => {
+      const app = createApp(
+        readConfig({
+          PUBLIC_URL: publicUrl,
+          APP_VERSION: version,
+          TOTP_ENCRYPTION_KEY: encryptionKey.toString("base64"),
+          NODE_ENV: production ? "production" : "development",
+          TRUST_PROXY: trustProxy,
+        }),
+        undefined,
+        database,
       );
+      if (!withoutSocketIp) return request(app);
+      return request(
+        express().use((req, _res, next) => {
+          Object.defineProperty(req.socket, "remoteAddress", {
+            value: undefined,
+          });
+          next();
+        }, app),
+      );
+    };
     const client = http();
     const timestamp = Date.now();
     const totp = (offset = 0) =>
@@ -383,7 +397,7 @@ export function authSpecs(
         undefined,
         `198.51.100.2, ${forwardedIp}`,
       ).expect(401);
-      expect(passwordError.text).toBe(totpError.text);
+      expect(passwordError.text === totpError.text).toBe(true);
       for (let i = 3; i <= 5; i++)
         await login(
           form,
@@ -421,6 +435,261 @@ export function authSpecs(
   );
 
   run(
+    "S14: Passenger supplies the limiter IP and missing IPs only count globally",
+    async ({ begin, login, http, key, sql, event, password }) => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const passenger = http(key, false, "passenger");
+        const address = "203.0.113.14";
+        const header = "!~Passenger-Client-Address";
+        const form = fields(
+          await begin("S256", passenger)
+            .set(header, address)
+            .set("X-Forwarded-For", forwardedIp)
+            .set("Authorization", `Bearer ${password}`)
+            .expect(200),
+        );
+        for (let i = 1; i <= 5; i++) {
+          await login(
+            form,
+            { password: random() },
+            passenger,
+            `198.51.100.${i}`,
+          )
+            .set(header, address)
+            .expect(401);
+        }
+        await login(form, {}, passenger).set(header, address).expect(429);
+        expect((await event("login", "blocked")).ip).toBe(address);
+        for (let i = 7; i <= 21; i++) {
+          const response = await login(form, {}, passenger, `198.51.100.${i}`)
+            .set(header, address)
+            .expect(429);
+          if (i === 21) expect(response.headers["retry-after"]).toBeDefined();
+        }
+
+        const socket = http(key, false, "passenger", true);
+        const socketForm = fields(await begin("S256", socket).expect(200));
+        await login(socketForm, { password: random() }, socket)
+          .set(header, "invalid-address")
+          .expect(401);
+        for (let i = 0; i < 5; i++) {
+          await login(socketForm, { password: random() }, socket).expect(401);
+        }
+        expect((await event("login", "invalid")).ip).toBeNull();
+        await login(socketForm, {}, socket).expect(200);
+        await sql.query(
+          `INSERT INTO auth_attempts (ip) SELECT ip FROM auth_attempts LIMIT 9`,
+        );
+        const blocked = fields(await begin("S256", socket).expect(200));
+        await login(blocked, {}, socket).expect(429);
+        expect((await event("login", "blocked")).ip).toBeNull();
+
+        expect(info.mock.calls.length).toBe(1);
+        expect(info.mock.calls[0][1]).toMatchObject({
+          passengerHeader: true,
+          forwardedForHeader: true,
+          ip: address,
+        });
+        const diagnostic = JSON.stringify([
+          ...info.mock.calls,
+          ...warn.mock.calls,
+        ]);
+        expect(
+          diagnostic.includes(password) ||
+            diagnostic.includes(form.csrf) ||
+            diagnostic.includes(form.cookie.split("=")[1]) ||
+            diagnostic.includes(forwardedIp),
+        ).toBe(false);
+        for (const detail of [
+          address,
+          "socket",
+          "remoteAddress",
+          "passengerHeader",
+          "forwardedForHeader",
+        ]) {
+          expect(diagnostic.includes(detail)).toBe(true);
+        }
+        expect(warn.mock.calls.length).toBe(1);
+      } finally {
+        info.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
+
+  run(
+    "S15: blocked requests and both POST limiters respond without the user row lock",
+    async ({ begin, login, consent, sql }) => {
+      const approval = fields(
+        await login(fields(await begin().expect(200))).expect(200),
+      );
+      const form = fields(await begin().expect(200));
+      for (let i = 0; i < 5; i++)
+        await login(form, { password: random() }).expect(401);
+      await sql.beginTransaction();
+      try {
+        await sql.query("SELECT id FROM auth_users WHERE id = 1 FOR UPDATE");
+        for (let i = 7; i <= 20; i++)
+          await login(form).timeout(2000).expect(429);
+        const limited = await login(form).timeout(2000).expect(429);
+        expect(limited.headers["ratelimit-remaining"]).toBe("0");
+        expect(limited.headers["retry-after"]).toBeDefined();
+        for (let i = 0; i < 20; i++)
+          await consent({ csrf: "", cookie: "" }).expect(403);
+        await consent(approval)
+          .timeout(2000)
+          .expect(429)
+          .expect("Retry-After", /\d+/);
+      } finally {
+        await sql.rollback();
+      }
+      const [[counts]] = await sql.query<
+        RowDataPacket[]
+      >(`SELECT COUNT(*) AS total,
+        SUM(outcome = 'blocked') AS blocked FROM auth_events WHERE event_type = 'login'`);
+      expect(Number(counts.total)).toBe(7);
+      expect(Number(counts.blocked)).toBe(1);
+    },
+  );
+
+  run(
+    "S16: auth:unlock clears a global login block and records the operation",
+    async ({ begin, login, sql, issue, ping }) => {
+      const { access_token: access } = await issue();
+      await sql.query("UPDATE auth_users SET last_totp_step = NULL");
+      await sql.query("INSERT INTO auth_attempts (ip) VALUES ?", [
+        Array.from({ length: 20 }, (_, i) => [`192.0.2.${i + 30}`]),
+      ]);
+      const form = fields(await begin().expect(200));
+      await login(form).expect(429);
+      await ping(access).expect(200);
+      const url = new URL(setting("DATABASE_URL"));
+      url.pathname = "/finance_test";
+      await promisify(execFile)(
+        process.execPath,
+        [setting("npm_execpath"), "run", "auth:unlock"],
+        {
+          env: {
+            ...process.env,
+            DATABASE_URL: url.href,
+            DATABASE_SOCKET: undefined,
+          },
+        },
+      );
+      const [[audit]] = await sql.query<
+        RowDataPacket[]
+      >(`SELECT COUNT(*) AS total FROM auth_events
+        WHERE event_type = 'login' AND outcome = 'success' AND client_id IS NULL AND ip IS NULL`);
+      expect(Number(audit.total)).toBe(1);
+      await login(form).expect(200);
+      await ping(access).expect(200);
+    },
+  );
+
+  run(
+    "S17: consent shows the warning and the registration time in La Paz, with escaped client metadata",
+    async ({ begin, login, sql, clientId }) => {
+      await sql.execute(
+        `UPDATE oauth_clients SET created_at = '2026-11-03 02:15:00.000',
+        metadata = JSON_SET(metadata, '$.client_name', '<em>Claude</em>') WHERE id = ?`,
+        [clientId],
+      );
+      const form = fields(await begin().expect(200));
+      const { text } = await login(form).expect(200);
+      expect(
+        text.includes(
+          "Autoriza solo si acabas de iniciar la conexión desde tu Claude",
+        ),
+      ).toBe(true);
+      expect(/02\/11\/2026.{0,12}22:15/s.test(text)).toBe(true);
+      expect(text.includes("&lt;em&gt;Claude&lt;/em&gt;")).toBe(true);
+    },
+  );
+
+  run(
+    "S18: issuing and refreshing purge stale auth data while preserving live families and replay checks",
+    async ({
+      begin,
+      register,
+      exchange,
+      authorize,
+      refresh,
+      ping,
+      sql,
+      clientId,
+    }) => {
+      const old = (await register().expect(201)).body.client_id;
+      await sql.execute(
+        "UPDATE oauth_clients SET created_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 31 DAY) WHERE id IN (?, ?)",
+        [old, clientId],
+      );
+      const stale = fields(await begin().expect(200));
+      await sql.execute(
+        `UPDATE oauth_authorization_codes SET client_id = ?, expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 25 HOUR) WHERE id = ?`,
+        [old, hash(stale.cookie.split("=")[1])],
+      );
+      const recent = fields(await begin().expect(200));
+      await sql.execute(
+        `UPDATE oauth_authorization_codes SET expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 23 HOUR) WHERE id = ?`,
+        [hash(recent.cookie.split("=")[1])],
+      );
+      await sql.query(
+        `INSERT INTO auth_attempts (ip, created_at) VALUES ('192.0.2.21', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 25 HOUR)), ('192.0.2.22', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 23 HOUR))`,
+      );
+      const code = await authorize();
+      const first = (await exchange(code).expect(200)).body;
+      const [[counts]] = await sql.execute<RowDataPacket[]>(
+        `SELECT
+        (SELECT COUNT(*) FROM oauth_authorization_codes WHERE expires_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY)) AS codes,
+        (SELECT COUNT(*) FROM auth_attempts) AS attempts,
+        (SELECT COUNT(*) FROM oauth_clients WHERE id = ?) AS old_client,
+        (SELECT COUNT(*) FROM oauth_clients WHERE id = ?) AS live_client,
+        (SELECT COUNT(*) FROM auth_events WHERE event_type = 'setup') AS events`,
+        [old, clientId],
+      );
+      expect(Object.values(counts).map(Number)).toEqual([0, 1, 0, 1, 1]);
+
+      await sql.execute(
+        `UPDATE oauth_authorization_codes SET expires_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 25 HOUR) WHERE code_hash = ?`,
+        [hash(code)],
+      );
+      await sql.query(
+        `UPDATE auth_attempts SET created_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 25 HOUR)`,
+      );
+      const inactive = (await register().expect(201)).body.client_id;
+      await sql.execute(
+        `UPDATE oauth_clients SET created_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 31 DAY) WHERE id = ?`,
+        [inactive],
+      );
+      await sql.execute(
+        `INSERT INTO oauth_tokens (token_hash, token_type, family_id, client_id, resource, expires_at, family_expires_at, revoked_at)
+        SELECT ?, token_type, ?, ?, resource, expires_at, family_expires_at, UTC_TIMESTAMP(3)
+        FROM oauth_tokens WHERE token_hash = ?`,
+        [randomBytes(32), randomBytes(32), inactive, hash(first.refresh_token)],
+      );
+      const rotated = (await refresh(first.refresh_token).expect(200)).body;
+      const [[attempts]] = await sql.query<RowDataPacket[]>(
+        "SELECT COUNT(*) AS total FROM auth_attempts",
+      );
+      expect(Number(attempts.total)).toBe(0);
+      const [[purged]] = await sql.execute<RowDataPacket[]>(
+        `SELECT
+        (SELECT COUNT(*) FROM oauth_clients WHERE id = ?) AS clients,
+        (SELECT COUNT(*) FROM oauth_tokens WHERE client_id = ?) AS tokens`,
+        [inactive, inactive],
+      );
+      expect(Object.values(purged).map(Number)).toEqual([0, 0]);
+      await ping(rotated.access_token).expect(200);
+      await exchange(code, null).expect(400);
+      await ping(rotated.access_token).expect(200);
+      await exchange(code).expect(400);
+      await ping(rotated.access_token).expect(401);
+    },
+  );
+
+  run(
     "S7: CSRF uses two request-specific values and secure headers",
     async ({ begin, login, http, key, client }) => {
       const page = await begin("S256", http(key, true))
@@ -451,42 +720,57 @@ export function authSpecs(
   );
 
   run(
-    "S8: auth storage has no plaintext credentials and wrong encryption keys fail safely",
+    "S8/S19: auth storage has no plaintext credentials, CSRF or cookie and wrong encryption keys fail safely",
     async ({
-      authorize,
       exchange,
       password,
       secret,
       begin,
       login,
+      consent,
       http,
       sql,
     }) => {
-      const code = await authorize();
+      const assertNoPlaintext = async (...needles: Buffer[]) => {
+        for (const table of tables) {
+          const [rows] = await sql.query<RowDataPacket[]>(
+            `SELECT * FROM ${table}`,
+          );
+          for (const row of rows)
+            for (const value of Object.values(row)) {
+              const bytes = Buffer.isBuffer(value)
+                ? value
+                : Buffer.from(String(value));
+              expect(
+                needles.some((needle) => bytes.includes(needle)),
+                table,
+              ).toBe(false);
+            }
+        }
+      };
+      const form = fields(await begin().expect(200));
+      const cookieValue = Buffer.from(form.cookie.split("=")[1]);
+      await assertNoPlaintext(Buffer.from(form.csrf), cookieValue);
+      const approval = fields(await login(form).expect(200));
+      await assertNoPlaintext(Buffer.from(approval.csrf), cookieValue);
+      const redirect = await consent(approval).expect(303);
+      const code = new URL(redirect.headers.location).searchParams.get("code");
+      if (!code) throw new Error("Falta el código de autorización");
       const { body } = await exchange(code).expect(200);
-      const needles = [
-        password,
-        secret.base32,
-        secret.hex,
-        code,
-        body.access_token,
-        body.refresh_token,
-      ].map((value) => Buffer.from(value));
-      needles.push(Buffer.from(secret.hex, "hex"));
-      for (const table of tables) {
-        const [rows] = await sql.query<RowDataPacket[]>(
-          `SELECT * FROM ${table}`,
-        );
-        for (const row of rows)
-          for (const value of Object.values(row)) {
-            const bytes = Buffer.isBuffer(value)
-              ? value
-              : Buffer.from(String(value));
-            expect(needles.some((needle) => bytes.includes(needle))).toBe(
-              false,
-            );
-          }
-      }
+      await assertNoPlaintext(
+        ...[
+          password,
+          secret.base32,
+          secret.hex,
+          code,
+          body.access_token,
+          body.refresh_token,
+          form.csrf,
+          approval.csrf,
+        ].map((value) => Buffer.from(value)),
+        Buffer.from(secret.hex, "hex"),
+        cookieValue,
+      );
       const problem = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const wrong = http(randomBytes(32));

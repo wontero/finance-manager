@@ -26,6 +26,7 @@ import {
   authTransaction,
   digest,
   newToken,
+  purgeAuth,
   revokeFamily,
   type AuthDb,
 } from "./auth-store.js";
@@ -270,6 +271,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
       (${digest(refresh)}, 'refresh', ${family}, ${client.client_id}, ${this.config.resource.href},
         LEAST(DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY), ${familyExpiry}), ${familyExpiry})
     `.execute(db);
+    await purgeAuth(db);
     const expiresIn =
       deadline === undefined
         ? accessSeconds

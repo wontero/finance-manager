@@ -24,6 +24,7 @@
     "db:setup": "tsx --env-file=.env src/server/scripts/setup-database.ts",
     "migrate": "node --env-file-if-exists=.env src/server/dist/migrate.js",
     "auth:setup": "node --env-file-if-exists=.env src/server/dist/auth-cli.js setup",
+    "auth:unlock": "node --env-file-if-exists=.env src/server/dist/auth-cli.js unlock",
     "auth:tokens": "node --env-file-if-exists=.env src/server/dist/auth-cli.js tokens"
   },
   "devDependencies": {
