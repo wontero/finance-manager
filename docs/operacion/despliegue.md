@@ -1,6 +1,6 @@
 # Despliegue en cPanel
 
-Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. Este spike usa una base vacía y publica una herramienta `ping` sin autenticación.
+Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`. El proyecto se instala en `~/apps/finanzasmateo`, fuera de directorios públicos. El conector MCP usa OAuth y ofrece la herramienta `ping`.
 
 ## 1. Crea el subdominio y comprueba HTTPS
 
@@ -38,7 +38,30 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
    MIGRATION_DATABASE_URL=mysql://ingete7_finmig:CLAVE_MIG_CODIFICADA@localhost:3306/ingete7_finanzas
    READONLY_DATABASE_NAME=ingete7_finanzas_ro
    READONLY_DATABASE_URL=mysql://ingete7_finro:CLAVE_RO_CODIFICADA@localhost:3306/ingete7_finanzas_ro
+   PUBLIC_URL=https://finanzasmateo.ingetech.biz
+   TRUST_PROXY=loopback
    ```
+
+   Desde esa misma terminal, genera una clave de 32 bytes para cifrar el secreto TOTP. Ejecuta el comando una vez. Comprueba si la variable existe antes de añadirla, incluso si el archivo ya tiene una configuración de autenticación.
+
+   ```bash
+   /opt/cpanel/ea-nodejs22/bin/node -e '
+     const fs = require("node:fs");
+     const file = process.argv[1];
+     if (Object.hasOwn(require("node:util").parseEnv(fs.readFileSync(file, "utf8")), "TOTP_ENCRYPTION_KEY")) {
+       console.error("TOTP_ENCRYPTION_KEY ya existe");
+       process.exit(1);
+     }
+     const key = require("node:crypto").randomBytes(32).toString("base64");
+     fs.appendFileSync(file, "\nTOTP_ENCRYPTION_KEY=" + key + "\n");
+   ' "$app_dir/shared/.env"
+   ```
+
+   Conserva esta clave junto con los secretos respaldados de la instancia. Si la pierdes, genera una nueva y ejecuta `auth:setup` para dar de alta otro TOTP y revocar los tokens anteriores.
+
+   `TRUST_PROXY=loopback` confía en Apache/Passenger en la interfaz local. Úsalo cuando Apache sea el único punto de entrada y añada al final de `X-Forwarded-For` la IP de su cliente o la entregue como dirección remota. Mantén el backend inaccesible desde Internet. Para Node expuesto directamente, usa `TRUST_PROXY=off`, que ignora la cabecera. Si cambias la topología, comprueba de nuevo la IP efectiva antes de aceptar tráfico.
+
+   `OAUTH_ALLOWED_REDIRECT_URIS` autoriza por defecto `https://claude.ai/api/mcp/auth_callback` y `https://claude.com/api/mcp/auth_callback`. Para añadir otra, fija la lista completa de URLs HTTPS exactas separadas por comas en `shared/.env` y reinicia Passenger. Incluye los callbacks anteriores si deben seguir funcionando.
 
    Node carga el archivo al arrancar. Puedes definir `APP_VERSION` para cambiar la versión reportada en `/health` y `ping`. Con la configuración por defecto, el servidor usa el build de `src/web/dist` y Passenger asigna su propio socket. Si ejecutas `node app.js` directamente, `PORT` controla el puerto y vale 3000 por defecto. [Asignación de puertos en Passenger](https://www.phusionpassenger.com/docs/advanced_guides/in_depth/node/reverse_port_binding.html)
 
@@ -130,19 +153,32 @@ cPanel busca `app.js` en la raíz de la aplicación y el cargador documentado de
 
 ## 6. Prueba Claude en web y en el celular
 
-1. En Claude.ai, abre **Customize → Connectors → + Add → Add custom connector**. En una organización, usa **Organization settings → Connectors** con el rol que permite añadir conectores.
-2. Escribe **Finance Manager** y la URL `https://finanzasmateo.ingetech.biz/mcp`. Elige **No sign in** y guarda el conector.
-3. En un chat nuevo de la web, abre **+ → Connectors**, activa **Finance Manager** y pide «Ejecuta la herramienta ping de Finance Manager y muestra la respuesta». Verifica `pong`, la versión y la hora ISO.
-4. En el celular, abre la app de Claude con la misma cuenta y espacio de trabajo. Activa el conector en un chat nuevo y repite la prueba.
-5. Al terminar, elimina **Finance Manager** en **Customize → Connectors**. Si se añadió desde la organización, elimínalo en **Organization settings → Connectors**. [Configurar y eliminar conectores personalizados](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp), [Disponibilidad de conectores remotos](https://support.claude.com/en/articles/11725091-when-to-use-desktop-and-web-connectors)
+1. En una terminal interactiva del VPS, crea el usuario único después de aplicar las migraciones. Escribe la contraseña dos veces. La terminal no la muestra mientras escribes. Añade la URI `otpauth://` o el secreto base32 a tu aplicación de autenticación. Usa una terminal sin grabación durante el alta.
 
-El spike usa Streamable HTTP sin sesiones y con respuestas JSON mediante el SDK oficial TypeScript `@modelcontextprotocol/sdk` **1.32.2**. Si pruebas el endpoint a mano, envía los dos tipos de contenido en `Accept` como exige el protocolo. Una petición `GET /mcp` devuelve 405. [Transporte Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [SDK TypeScript](https://ts.sdk.modelcontextprotocol.io/server)
+   ```bash
+   cd "$app_dir/current"
+   export PATH="/opt/cpanel/ea-nodejs22/bin:$PATH"
+   npm run auth:setup
+   ```
+
+2. En Claude.ai, abre **Customize → Connectors → + Add → Add custom connector**. En una organización, usa **Organization settings → Connectors** con el rol que permite añadir conectores.
+3. Escribe **Finance Manager** y la URL `https://finanzasmateo.ingetech.biz/mcp`. Selecciona **Sign in now** y **Register automatically** para el cliente OAuth. Continúa hasta la pantalla de Finance Manager.
+4. Introduce la contraseña y el código de seis dígitos. Confirma que el consentimiento muestra el cliente y el host de retorno esperado de Claude, y autoriza el acceso.
+5. En un chat nuevo de la web, abre **+ → Connectors**, activa **Finance Manager** y pide «Ejecuta la herramienta ping de Finance Manager y muestra la respuesta». Verifica `pong`, la versión y la hora ISO. Repite la prueba en la app móvil con la misma cuenta y espacio de trabajo. [Configurar conectores personalizados](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+
+El conector usa Streamable HTTP sin sesiones y responde con JSON. Una petición `GET /mcp` devuelve 405. Una petición `POST /mcp` sin token devuelve 401. La cabecera `WWW-Authenticate` apunta a `/.well-known/oauth-protected-resource/mcp`. [Transporte Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
 ```bash
-curl -fsS https://finanzasmateo.ingetech.biz/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"1"}}}'
+curl -si -X POST https://finanzasmateo.ingetech.biz/mcp
+curl -fsS https://finanzasmateo.ingetech.biz/.well-known/oauth-protected-resource/mcp
+```
+
+Para gestionar el acceso desde la terminal del servidor, entra en `current` y usa los siguientes comandos. La lista muestra identificadores, tipo, cliente y vencimiento. Sustituye `123` por un identificador de la lista. Revocar un token revoca su familia. Para desconectar a todos los clientes, usa `revoke-all`. Un nuevo alta con `auth:setup` reemplaza la contraseña y el TOTP y revoca todos los tokens.
+
+```bash
+npm run auth:tokens -- list
+npm run auth:tokens -- revoke 123
+npm run auth:tokens -- revoke-all
 ```
 
 ## 7. Despliega cambios y usa rollback

@@ -15,6 +15,39 @@
 - Cada pool abre hasta 5 conexiones y admite hasta 64 solicitudes en espera. Cada conexión inicia con `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,ERROR_FOR_DIVISION_BY_ZERO` y zona horaria UTC. `/health` comparte y conserva el resultado de su comprobación durante 10 segundos. Su plazo total es de 1,5 segundos, incluso cuando espera una conexión.
 - Vitest ejecuta las pruebas, Supertest comprueba la API HTTP y Testing Library comprueba la interfaz. ESLint, TypeScript y Prettier verifican el código.
 
+## Autenticación MCP
+
+Express usa `mcpAuthRouter` y `requireBearerAuth` del SDK de MCP. Publica metadatos OAuth del emisor y del recurso a partir de `PUBLIC_URL`. Solo admite el ámbito `finance`, clientes públicos y códigos con PKCE S256. `/health` es público.
+
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant N as Navegador de Mateo
+    participant F as Finance Manager
+    participant B as MariaDB
+    C->>F: POST /mcp sin token
+    F-->>C: 401 con enlace a metadatos
+    C->>F: GET metadatos y POST /register
+    F->>B: Registra el cliente público
+    C->>N: Abre /authorize con reto S256
+    N->>F: Envía contraseña y TOTP
+    F->>B: Verifica y consume el paso TOTP
+    F-->>N: Muestra el consentimiento
+    N->>F: Confirma el acceso
+    F-->>N: Redirige al callback con el código
+    N->>C: Entrega el código
+    C->>F: POST /token con el verificador PKCE
+    F->>B: Consume el código y guarda los hashes
+    F-->>C: Tokens de acceso y refresco
+    C->>F: POST /mcp con Bearer
+    F->>B: Verifica vigencia, revocación y recurso
+    F-->>C: Respuesta MCP
+```
+
+Los códigos duran cinco minutos y los tokens de acceso duran una hora, hasta el límite de vida de su familia. Cada refresco rota el token, con una ventana deslizante de 30 días y un máximo de 90 días desde la emisión inicial. Reutilizar un código consumido con su verificador o un refresco rotado revoca la familia. MariaDB guarda hashes SHA-256 de tokens opacos de 32 bytes. La contraseña se deriva con scrypt y una sal individual. El secreto TOTP se cifra con AES-256-GCM y una clave de entorno.
+
+El formulario usa un token CSRF y una cookie ligados a la solicitud. MariaDB serializa los cambios de autenticación y cuenta los intentos fallidos por IP y globalmente. Los eventos registran el tipo, resultado, IP, agente truncado, cliente y fecha UTC. Los datos de autenticación quedan en la base principal, fuera de las vistas de consulta. El endpoint OAuth `/revoke` limita al cliente a la familia del token que presenta. Los comandos administrativos se ejecutan en la terminal del servidor.
+
 ## Datos contables
 
 `accounts` guarda el árbol de cuentas y categorías. Las categorías son cuentas de ingreso y gasto. Una cuenta de activo o pasivo tiene moneda fija, mientras que las de ingreso, gasto y patrimonio admiten líneas en varias monedas. Los activos pueden ser `banco`, `efectivo`, `ahorro`, `inversion` o `por_cobrar`. Los pasivos pueden ser `tarjeta_credito` o `prestamo_recibido`. `currencies` define las unidades mínimas. Solo se exige un nombre único entre hermanos activos, incluidas las raíces.

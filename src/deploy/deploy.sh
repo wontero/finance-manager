@@ -202,7 +202,7 @@ redact_errors() {
         addUrl(source.MIGRATION_DATABASE_URL);
         addUrl(source.READONLY_DATABASE_URL);
         for (const [name, value] of Object.entries(source)) {
-          if (/PASSWORD|PASSWD|MYSQL_PWD/i.test(name)) addSecret(value);
+          if (/PASSWORD|PASSWD|MYSQL_PWD|TOKEN|SECRET|KEY/i.test(name)) addSecret(value);
         }
       }
       addUrl(process.env.DEPLOY_DIAGNOSTIC_REMOTE, true);

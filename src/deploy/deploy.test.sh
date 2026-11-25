@@ -45,6 +45,7 @@ case "$*" in
     if [[ ${FAIL_MIGRATE:-0} == 1 ]]; then
       echo orphan >> "$SCHEMA_OBJECTS"
       echo 'migrate: error de prueba mysql://user:app%40secret@localhost/test app@secret migration@secret' >&2
+      if [[ -n ${AUTH_FIXTURE_MARKERS:-} ]]; then printf '%s\n' "$AUTH_FIXTURE_MARKERS" >&2; fi
       exit 1
     fi ;;
 esac
@@ -245,6 +246,23 @@ if output=$(deploy ref-inexistente 2>&1); then fail 'S14: se aceptó una ref ine
 log=$(log_from_error "$output")
 grep -Fq 'ref-inexistente' "$log" || fail 'S14: error de git fetch ausente'
 echo 'PASA S14'
+
+# M-005 S11: generated markers represent credentials without using actual values.
+for name in TOKEN SECRET KEY PASSWORD; do
+  marker="fixture-${name,,}-$RANDOM-$RANDOM"
+  printf 'FIXTURE_%s_VALUE=%s\n' "$name" "$marker" >> "$DEPLOY_ROOT/shared/.env"
+  markers+=("$marker")
+done
+if output=$(AUTH_FIXTURE_MARKERS="${markers[*]}" FAIL_MIGRATE=1 deploy 2>&1); then
+  fail 'M-005 S11: se aceptó una migración fallida'
+fi
+log=$(log_from_error "$output")
+for marker in "${markers[@]}"; do
+  if grep -Fq "$marker" "$log"; then fail 'M-005 S11: credencial en el diagnóstico'; fi
+done
+grep -Fq '[redactado] [redactado] [redactado] [redactado]' "$log" ||
+  fail 'M-005 S11: falta el diagnóstico redactado'
+echo 'PASA M-005 S11'
 
 if HEALTH_BODY='{ "db": "unavailable" }' deploy; then fail 'S15: se aceptó db no disponible'; fi
 [[ $(current) == "$active" ]] || fail 'S15: no se restauró current tras fallar la BD'
