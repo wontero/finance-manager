@@ -10,7 +10,16 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
 
 ## 2. Prepara MariaDB y el entorno
 
-1. Abre **Databases → Database Wizard**. Crea una base vacía y un usuario exclusivo de la aplicación con una contraseña generada. Marca solo **SELECT** para esa base. Anota los nombres completos que muestra cPanel, incluido su prefijo si lo añadió. [Database Wizard](https://docs.cpanel.net/cpanel/databases/database-wizard/)
+1. Abre **Databases → Database Wizard** y **Manage My Databases**. Crea dos bases vacías (por ejemplo, `ingete7_finanzas` y `ingete7_finanzas_ro`) y tres usuarios con contraseñas distintas. Anota los nombres completos que muestra cPanel, incluido el prefijo. Al añadir cada usuario a una base, marca las casillas indicadas. [Database Wizard](https://docs.cpanel.net/cpanel/databases/database-wizard/)
+
+   | Usuario de ejemplo | Base principal                                 | Base de solo lectura |
+   | ------------------ | ---------------------------------------------- | -------------------- |
+   | `ingete7_finapp`   | **SELECT**, **INSERT**, **UPDATE**, **DELETE** | Sin asignación       |
+   | `ingete7_finmig`   | **ALL PRIVILEGES**                             | **ALL PRIVILEGES**   |
+   | `ingete7_finro`    | Sin asignación                                 | **SELECT**           |
+
+   La cuenta de migración crea las vistas como su propia cuenta definidora. Conserva esa cuenta mientras existan las vistas. Mantén la base de consulta dedicada a las vistas que crea el proyecto. [Permisos de las vistas en MariaDB](https://mariadb.com/docs/server/server-usage/views/create-view)
+
 2. Abre **Advanced → Terminal** o entra por SSH con el usuario de cPanel. Crea un directorio privado y abre el archivo de entorno.
 
    ```bash
@@ -22,13 +31,35 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
    nano "$app_dir/shared/.env"
    ```
 
-3. Añade una línea como esta con los nombres y la contraseña del primer paso. Codifica en porcentaje los caracteres reservados de la contraseña. Por ejemplo, escribe `%40` para `@`. Guarda el archivo con **Ctrl+O**, **Enter** y **Ctrl+X** si usas Nano.
+3. Añade los nombres y las contraseñas del primer paso. En las URLs, codifica en porcentaje los caracteres reservados, por ejemplo `%40` para `@`. Guarda el archivo con **Ctrl+O**, **Enter** y **Ctrl+X** si usas Nano.
 
    ```dotenv
-   DATABASE_URL=mysql://ingete7_USUARIO:CONTRASENA_CODIFICADA@localhost:3306/ingete7_BASE
+   DATABASE_URL=mysql://ingete7_finapp:CLAVE_APP_CODIFICADA@localhost:3306/ingete7_finanzas
+   MIGRATION_DATABASE_URL=mysql://ingete7_finmig:CLAVE_MIG_CODIFICADA@localhost:3306/ingete7_finanzas
+   READONLY_DATABASE_NAME=ingete7_finanzas_ro
+   READONLY_DATABASE_URL=mysql://ingete7_finro:CLAVE_RO_CODIFICADA@localhost:3306/ingete7_finanzas_ro
    ```
 
    Node carga el archivo al arrancar. Puedes definir `APP_VERSION` para cambiar la versión reportada en `/health` y `ping`. Con la configuración por defecto, el servidor usa el build de `src/web/dist` y Passenger asigna su propio socket. Si ejecutas `node app.js` directamente, `PORT` controla el puerto y vale 3000 por defecto. [Asignación de puertos en Passenger](https://www.phusionpassenger.com/docs/advanced_guides/in_depth/node/reverse_port_binding.html)
+
+4. Prepara `shared/mysql.cnf` antes del primer despliegue. Usa el mismo usuario, host y credenciales de `MIGRATION_DATABASE_URL`. La contraseña de este archivo usa la sintaxis de MariaDB, sin codificarla como URL.
+
+   ```bash
+   touch "$app_dir/shared/mysql.cnf"
+   chmod 600 "$app_dir/shared/mysql.cnf"
+   nano "$app_dir/shared/mysql.cnf"
+   ```
+
+   ```ini
+   [client]
+   user=ingete7_finmig
+   password="CLAVE_MIG"
+   host=localhost
+   port=3306
+   protocol=tcp
+   ```
+
+   Si las cuentas de cPanel requieren el socket Unix, define `DATABASE_SOCKET=/ruta/absoluta/mysql.sock` en `shared/.env` para la aplicación y el migrador. En `mysql.cnf`, cambia a `protocol=socket` y añade `socket=/ruta/absoluta/mysql.sock`. [Archivos de opciones de MariaDB](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/configuring-mariadb/configuring-mariadb-with-option-files)
 
 ## 3. Añade la deploy key al repositorio
 
@@ -55,6 +86,7 @@ Cuando `main` en GitHub contenga esta misión, ejecuta los siguientes comandos d
 
 ```bash
 export DEPLOY_REPO_URL="$repo_url"
+export DEPLOY_DB_NAME=ingete7_finanzas
 git init --bare "$app_dir/repo"
 git --git-dir="$app_dir/repo" fetch --no-tags "$repo_url" main
 bootstrap=$(mktemp)
@@ -63,7 +95,7 @@ bash "$bootstrap" --bootstrap
 rm -f -- "$bootstrap"
 ```
 
-`--bootstrap` compila `main` y crea `current` solo durante la instalación inicial. Comprueba que el script indique que preparó la release antes de registrarla. La verificación HTTPS se hace en el siguiente paso, una vez que exista la ruta de Passenger.
+`--bootstrap` compila `main`, respalda la base principal, aplica sus migraciones y crea `current` solo durante la instalación inicial. Comprueba que el script indique que preparó la release antes de registrarla. La verificación HTTPS se hace en el siguiente paso, una vez que exista la ruta de Passenger.
 
 Si usas `nohup`, sigue el ejemplo del paso 7 con `bash "$bootstrap" --bootstrap` y borra el archivo temporal cuando el proceso haya terminado.
 
@@ -120,10 +152,21 @@ Si están disponibles, abre `tmux new -s finanzas` o `screen -S finanzas` antes 
 ```bash
 app_dir="$HOME/apps/finanzasmateo"
 export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/finance_manager_deploy -o IdentitiesOnly=yes"
+export DEPLOY_DB_NAME=ingete7_finanzas
 bash "$app_dir/current/src/deploy/deploy.sh" main
 ```
 
-Si ninguno está instalado, define `app_dir` y `GIT_SSH_COMMAND` como arriba, deja la clave lista para uso sin preguntas y ejecuta el despliegue con `nohup`.
+Si estás actualizando desde el spike M-002/M-002B, ejecuta el script de la release nueva para que la primera migración use el mecanismo de restauración actual. Con las variables de los pasos 3 y 4 definidas, sustituye la última línea del ejemplo por estos comandos.
+
+```bash
+git --git-dir="$app_dir/repo" fetch --no-tags "$repo_url" main
+installer=$(mktemp)
+git --git-dir="$app_dir/repo" show FETCH_HEAD:src/deploy/deploy.sh > "$installer"
+bash "$installer" main
+rm -f -- "$installer"
+```
+
+Si ninguno está instalado, define `app_dir`, `GIT_SSH_COMMAND` y `DEPLOY_DB_NAME` como arriba, deja la clave lista para uso sin preguntas y ejecuta el despliegue con `nohup`.
 
 ```bash
 session_log=$(mktemp "$app_dir/shared/deploy-ssh.XXXXXX.log")
@@ -140,11 +183,11 @@ Si se corta SSH, vuelve a conectarte y recupera la sesión con `tmux attach -t f
 
 Puedes cambiar las rutas con `DEPLOY_ROOT`, `DEPLOY_RELEASES_DIR`, `DEPLOY_SHARED_DIR` y `DEPLOY_REPO_DIR`. Usa `DEPLOY_REPO_URL` si cambia el origen, `DEPLOY_NODE_BIN` si Node 22 está en otro directorio y `DEPLOY_HEALTH_URL` si cambia la URL de salud. Los reintentos usan `DEPLOY_HEALTH_ATTEMPTS` (10) y `DEPLOY_HEALTH_DELAY` (3 segundos).
 
-### Cuando se incorporen las migraciones
+### Copia y restauración de una migración fallida
 
-Si la release trae un script npm `migrate`, prepara `shared/mysql.cnf` con permisos 600. Dentro de la sección `[client]`, define `host`, `port`, `user` y `password` para una cuenta separada con permisos de copia y restauración sobre esa base. Exporta `DEPLOY_DB_NAME` con el nombre exacto de la base que migrará el script. Si el archivo está en otro lugar, indica su ruta con `DEPLOY_DB_OPTIONS`.
+El volcado de la base principal usa la cuenta de migración de `shared/mysql.cnf`. Si el archivo está en otro lugar, indica su ruta con `DEPLOY_DB_OPTIONS`. `DEPLOY_DB_NAME` debe coincidir con la base de `MIGRATION_DATABASE_URL` y `DATABASE_URL`.
 
-Ensaya la copia y restauración en una base desechable y detén las escrituras durante la ventana de migración. Si falla `migrate`, el script repone la base desde la copia en `shared/backups`, lo cual reemplaza los datos de esa base con los del momento del respaldo. El rollback de código por fallo de salud o por `--rollback` conserva el esquema resultante de una migración exitosa. Planifica las migraciones para que la versión anterior siga funcionando durante ese intervalo. [Copia lógica de MariaDB](https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-dump)
+Ensaya la copia y restauración en una base desechable y detén las escrituras durante la ventana de migración. Si falla `migrate`, el script elimina las vistas y tablas de la base principal y carga la copia de `shared/backups` en la misma base. El esquema y los datos vuelven al momento del volcado, con la base y sus permisos intactos. Las vistas de consulta se administran con el migrador. Si la recreación de esas vistas se interrumpió, compruébalas tras restaurar la principal. El rollback de código por fallo de salud o por `--rollback` conserva el esquema de una migración exitosa. Planifica las migraciones para que la versión anterior siga funcionando durante ese intervalo. [Copia lógica de MariaDB](https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-dump)
 
 ## Si algo falla
 
@@ -152,4 +195,5 @@ Ensaya la copia y restauración en una base desechable y detén las escrituras d
 - **500 o cabecera de release antigua**. Revisa `~/apps/finanzasmateo/shared/logs/` desde **File Manager**, o `~/apps/finanzasmateo/current/logs/` mientras haya una release activa. Comprueba la versión de Node seleccionada para Passenger y que `current` apunte a la release compilada. Para pedir otro reinicio, toca `current/tmp/restart.txt`. Los errores recientes de Apache aparecen en **Metrics → Errors**. [Logs de Application Manager](https://docs.cpanel.net/cpanel/software/application-manager/#log-files), [Errores de Apache en cPanel](https://docs.cpanel.net/cpanel/metrics/errors/)
 - **MariaDB no disponible**. Revisa los nombres completos, permisos de la base y codificación de la contraseña en `shared/.env`. Toca `current/tmp/restart.txt` después de guardar cambios.
 - **Descarga, copia, migración o restauración fallida**. Abre el archivo `shared/logs/deploy-<release>.log` que indica el error. El archivo tiene permisos 600 y contiene el diagnóstico con las credenciales de configuración filtradas.
+- **MariaDB rechaza crear triggers con el error 1419**. Pide al proveedor que compruebe la configuración de registro binario y si permite a la cuenta de migración crear y restaurar los triggers. [Variables del registro binario de MariaDB](https://mariadb.com/docs/server/ha-and-performance/standard-replication/replication-and-binary-log-system-variables#log_bin_trust_function_creators)
 - **MCP falla**. Comprueba la URL completa y prueba `initialize` con el comando anterior. Si pasa en la terminal, revisa que el conector esté habilitado en el chat y que el celular use la misma cuenta y espacio de trabajo.

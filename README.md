@@ -21,7 +21,7 @@ npm ci
 Copy-Item .env.example .env
 ```
 
-Si ya tienes la instancia local configurada, completa `.env` con sus rutas y credenciales. `DATABASE_URL` apunta a `finance_dev`. `MARIADB_SHUTDOWN_URL` usa la misma dirección y puerto. Codifica los caracteres reservados de las contraseñas al escribirlas en una URL.
+Completa `.env` con las rutas de la instancia local y claves distintas para `finance_dev`, `finance_migration`, `finance_readonly` y `finance_shutdown`. Conserva el host y puerto local en las URLs. Codifica en porcentaje los caracteres reservados de las contraseñas.
 
 Para preparar una instancia nueva, extrae el ZIP de MariaDB fuera del repositorio. Ejecuta lo siguiente una vez, con un directorio de datos nuevo y una clave de administración local. Tras iniciar el servidor en primer plano, abre otra sesión de PowerShell para conectarte como `root`.
 
@@ -34,29 +34,38 @@ $rootCredential = [pscredential]::new('root', $rootPassword)
 & "$mariaHome/bin/mariadbd.exe" --no-defaults "--basedir=$mariaHome" "--datadir=$mariaData" --bind-address=127.0.0.1 --port=3308 --skip-name-resolve --console
 ```
 
-Conecta con `mariadb.exe --no-defaults --host=127.0.0.1 --port=3308 --user=root --password` desde la carpeta `bin` de MariaDB. Ejecuta el SQL con dos claves locales distintas y úsalas en `.env`.
+Para una instancia nueva, conecta con `mariadb.exe --no-defaults --host=127.0.0.1 --port=3308 --user=root --password` desde la carpeta `bin` de MariaDB. Crea la cuenta local de apagado con la contraseña de `MARIADB_SHUTDOWN_URL`.
 
 ```sql
-CREATE DATABASE finance_dev CHARACTER SET utf8mb4;
-CREATE DATABASE finance_test CHARACTER SET utf8mb4;
-CREATE USER 'finance_dev'@'127.0.0.1' IDENTIFIED BY 'CLAVE_DEV';
-GRANT ALL PRIVILEGES ON `finance\_dev`.* TO 'finance_dev'@'127.0.0.1';
-GRANT ALL PRIVILEGES ON `finance\_test`.* TO 'finance_dev'@'127.0.0.1';
 CREATE USER 'finance_shutdown'@'127.0.0.1' IDENTIFIED BY 'CLAVE_SHUTDOWN';
 GRANT SHUTDOWN ON *.* TO 'finance_shutdown'@'127.0.0.1';
 ```
 
-Ejecuta `npm run db:stop` para cerrar la sesión del servidor en primer plano después de preparar `.env`. A partir de entonces, usa `npm run db:start` y `npm run db:stop` para iniciar y detener la instancia bajo demanda.
+Con MariaDB en ejecución, usa `npm run db:setup` para crear o actualizar las cuatro bases locales y los tres usuarios de datos. Proporciona la clave de root solo a la sesión de preparación.
+
+```powershell
+$rootPassword = Read-Host 'Contraseña local de root' -AsSecureString
+$rootCredential = [pscredential]::new('root', $rootPassword)
+$env:MARIADB_ADMIN_URL = 'mysql://root:' + [uri]::EscapeDataString($rootCredential.GetNetworkCredential().Password) + '@127.0.0.1:3308'
+try {
+    npm run db:setup
+} finally {
+    Remove-Item Env:MARIADB_ADMIN_URL
+}
+```
+
+Si ya preparaste la instancia, usa `npm run db:start` antes de `db:setup`. Usa `npm run db:stop` para detenerla, incluso si arrancó en primer plano.
 
 ## Compilar y ejecutar
 
 - `npm run dev` inicia Express y Vite. El endpoint de salud está en `http://localhost:3000/health` y la web se abre en `http://localhost:5173`. Puedes cambiar el puerto de Express con `PORT` en `.env`.
 - `npm run build` genera `dist/` en cada workspace. Ejecuta `node app.js` para servir el build de la web, `/health` y `/mcp` desde el mismo proceso.
+- `npm run migrate`, después de compilar, aplica migraciones sobre `MIGRATION_DATABASE_URL` y actualiza las vistas de `READONLY_DATABASE_NAME`. Con el `.env` de ejemplo apunta a `finance_dev` y `finance_dev_ro`.
 
 ## Pruebas
 
 - `npm test` ejecuta las pruebas unitarias y HTTP sin MariaDB.
-- Ejecuta `npm run build` y `npm run db:start` antes de `npm run test:integration`. La suite prueba el arranque compilado, el estado de MariaDB y los permisos de `finance_dev` en `finance_test`. Al terminar, usa `npm run db:stop`.
+- `npm run test:integration` requiere el build y MariaDB local en ejecución con `db:setup` ejecutado. Aplica las migraciones en `finance_test` y `finance_test_ro` y comprueba el arranque, el esquema y los tres perfiles de acceso.
 - `bash src/deploy/deploy.test.sh` ejecuta las pruebas del despliegue con dobles y un repositorio Git temporal. En Windows usa WSL.
 - `npm run lint`, `npm run typecheck` y `npm run format:check` verifican el código y el formato.
 
