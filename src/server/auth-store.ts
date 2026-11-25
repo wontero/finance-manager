@@ -110,6 +110,9 @@ export async function purgeAuth(db: AuthDb) {
   await sql`DELETE FROM auth_attempts WHERE created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 24 HOUR)`.execute(
     db,
   );
+  await sql`DELETE FROM auth_events WHERE created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 365 DAY)`.execute(
+    db,
+  );
 
   const idle = sql`c.created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 30 DAY)
     AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = c.id AND ${live})`;

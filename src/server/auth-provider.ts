@@ -321,6 +321,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: Client, { token }: OAuthTokenRevocationRequest) {
+    if (!opaqueToken.test(token)) return;
     await authTransaction(this.db, async (db) => {
       const {
         rows: [row],

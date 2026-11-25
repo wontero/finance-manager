@@ -623,6 +623,33 @@ export function authSpecs(
   );
 
   run(
+    "M-007 S11: malformed revocation returns without the user row lock or an event",
+    async ({ http, sql, clientId }) => {
+      const events = async () =>
+        (
+          await sql.query<RowDataPacket[]>(
+            "SELECT COUNT(*) AS total FROM auth_events",
+          )
+        )[0][0].total;
+      const before = await events();
+      await sql.beginTransaction();
+      try {
+        await sql.query("SELECT id FROM auth_users WHERE id = 1 FOR UPDATE");
+        await http(undefined, false, "off", true)
+          .post("/revoke")
+          .type("form")
+          .send({ client_id: clientId, token: "malformed" })
+          .timeout(2000)
+          .expect(200);
+        expect(await events()).toBe(before);
+      } finally {
+        await sql.rollback();
+      }
+      expect(await events()).toBe(before);
+    },
+  );
+
+  run(
     "S20: Passenger IPs have separate token quotas",
     async ({ http, issue, refresh }) => {
       const { refresh_token: token } = await issue();
@@ -728,8 +755,17 @@ export function authSpecs(
       await sql.query(
         `INSERT INTO auth_attempts (ip, created_at) VALUES ('192.0.2.21', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 25 HOUR)), ('192.0.2.22', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 23 HOUR))`,
       );
+      await sql.query(
+        `INSERT INTO auth_events (event_type, outcome, ip, created_at)
+          VALUES ('revoke', 'invalid', '192.0.2.31', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 366 DAY)),
+                 ('revoke', 'success', '192.0.2.32', DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 364 DAY))`,
+      );
       const code = await authorize();
       const first = (await exchange(code).expect(200)).body;
+      const [events] = await sql.query(
+        "SELECT outcome FROM auth_events WHERE ip IN ('192.0.2.31', '192.0.2.32')",
+      );
+      expect(events).toEqual([{ outcome: "success" }]);
       const [[counts]] = await sql.execute<RowDataPacket[]>(
         `SELECT
         (SELECT COUNT(*) FROM oauth_authorization_codes WHERE expires_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY)) AS codes,

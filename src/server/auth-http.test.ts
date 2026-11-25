@@ -93,38 +93,48 @@ test("M-005C S21: Passenger ignores the header on non-loopback TCP and warns onc
   }
 });
 
-test("M-005C S21: Passenger accepts the header on a local socket without TCP metadata", async () => {
-  vi.resetModules();
-  const { createApp: freshApp } = await import("./app.js");
-  const info = vi.spyOn(console, "info").mockImplementation(() => {});
-  const config = readConfig({
-    PUBLIC_URL: publicUrl,
-    TRUST_PROXY: "passenger",
-  });
-  const local = request(
-    express().use((req, _res, next) => {
-      Object.defineProperties(req.socket, {
-        remoteAddress: { value: undefined },
-        remoteFamily: { value: undefined },
-        localAddress: { value: undefined },
-      });
-      next();
-    }, freshApp(config)),
-  );
-  try {
-    await local.get("/health").set(passengerHeader, "203.0.113.21").expect(200);
-    expect(info).toHaveBeenCalledExactlyOnceWith(
-      "Diagnóstico de IP de Passenger",
-      expect.objectContaining({
-        remoteAddress: null,
-        passengerHeader: true,
-        ip: "203.0.113.21",
-      }),
+test.each([undefined, "127.0.0.1", "::1", "::ffff:127.0.0.1"])(
+  "M-007 S11 / M-005C S21: Passenger accepts the header on local socket %s",
+  async (remoteAddress) => {
+    vi.resetModules();
+    const { createApp: freshApp } = await import("./app.js");
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const config = readConfig({
+      PUBLIC_URL: publicUrl,
+      TRUST_PROXY: "passenger",
+    });
+    const local = request(
+      express().use((req, _res, next) => {
+        Object.defineProperties(req.socket, {
+          remoteAddress: { value: remoteAddress },
+          remoteFamily: {
+            value: remoteAddress?.includes(":")
+              ? "IPv6"
+              : remoteAddress && "IPv4",
+          },
+          localAddress: { value: remoteAddress },
+        });
+        next();
+      }, freshApp(config)),
     );
-  } finally {
-    info.mockRestore();
-  }
-});
+    try {
+      await local
+        .get("/health")
+        .set(passengerHeader, "203.0.113.21")
+        .expect(200);
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        "Diagnóstico de IP de Passenger",
+        expect.objectContaining({
+          remoteAddress: remoteAddress ?? null,
+          passengerHeader: true,
+          ip: "203.0.113.21",
+        }),
+      );
+    } finally {
+      info.mockRestore();
+    }
+  },
+);
 
 test.each([
   ["/register", 20],
