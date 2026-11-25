@@ -33,15 +33,23 @@ export function createApp(
   release?: string,
 ) {
   const app = express();
+  let probe: ReturnType<typeof databaseStatus> | undefined;
+  let expiresAt = Infinity;
 
   app.get("/health", async (_request, response) => {
+    if (!probe || performance.now() >= expiresAt) {
+      expiresAt = Infinity;
+      probe = databaseStatus(database).finally(() => {
+        expiresAt = performance.now() + 10_000;
+      });
+    }
     response.set("Cache-Control", "no-store");
     if (release) response.set("X-Finance-Release", release);
     response.json({
       status: "ok",
       app: APP_NAME,
       version,
-      db: await databaseStatus(database),
+      db: await probe,
     });
   });
 

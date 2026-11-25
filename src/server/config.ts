@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import { z } from "zod";
 
 const serverDir =
@@ -36,17 +36,25 @@ const configSchema = z.object({
           throw new Error(dbError);
         }
         return {
-          host: url.hostname.replace(/^\[(.*)\]$/, "$1"),
-          port,
-          user: decodeURIComponent(url.username),
-          password: decodeURIComponent(url.password),
-          database: decodeURIComponent(url.pathname.slice(1)) || undefined,
+          tcp: { host: url.hostname.replace(/^\[(.*)\]$/, "$1"), port },
+          credentials: {
+            user: decodeURIComponent(url.username),
+            password: decodeURIComponent(url.password),
+            database: decodeURIComponent(url.pathname.slice(1)) || undefined,
+          },
         };
       } catch {
         ctx.addIssue({ code: "custom", message: dbError });
         return z.NEVER;
       }
     })
+    .optional(),
+  DATABASE_SOCKET: z
+    .string()
+    .refine(
+      (value) => posix.isAbsolute(value) && !value.includes("\0"),
+      "DATABASE_SOCKET debe indicar una ruta absoluta de socket Unix",
+    )
     .optional(),
   WEB_DIST_DIR: z
     .string()
@@ -68,9 +76,13 @@ export function readConfig(env: NodeJS.ProcessEnv) {
     );
   }
 
+  const { DATABASE_URL: database, DATABASE_SOCKET: socketPath } = parsed.data;
   return {
     port: parsed.data.PORT,
-    database: parsed.data.DATABASE_URL,
+    database: database && {
+      ...(socketPath ? { socketPath } : database.tcp),
+      ...database.credentials,
+    },
     webDistDir: resolve(parsed.data.WEB_DIST_DIR),
     version: parsed.data.APP_VERSION,
   };

@@ -2,8 +2,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout } from "node:timers/promises";
+import mariadb from "mariadb";
 import request from "supertest";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { APP_NAME } from "@finance-manager/core";
 import { createApp } from "./app.js";
 import { readConfig } from "./config.js";
@@ -90,6 +92,63 @@ test("S5: health hides database errors and responds within three seconds", async
     version,
     db: "unavailable",
   });
+});
+
+test("S11: concurrent health requests share a probe and cache it for 10 seconds", async () => {
+  const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+  const probe = vi
+    .spyOn(mariadb, "createConnection")
+    .mockImplementation(async () => {
+      await setTimeout(50);
+      throw new Error("Database unavailable");
+    });
+  const health = request(
+    createApp(
+      readConfig({
+        DATABASE_URL: "mysql://user:secret@localhost/test",
+      }),
+    ),
+  );
+  const batch = () =>
+    Promise.all(
+      Array.from({ length: 20 }, () =>
+        health
+          .get("/health")
+          .expect(200)
+          .expect(({ body }) => {
+            expect(body.db).toBe("unavailable");
+          }),
+      ),
+    );
+
+  try {
+    await batch();
+    expect(probe).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(9_999);
+    await batch();
+    expect(probe).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(10_000);
+    await batch();
+    expect(probe).toHaveBeenCalledTimes(2);
+  } finally {
+    probe.mockRestore();
+    clock.mockRestore();
+  }
+});
+
+test("S12: a Unix socket replaces TCP and must be an absolute path", () => {
+  const DATABASE_URL = "mysql://user:secret@localhost:3308/test";
+  expect(
+    readConfig({ DATABASE_URL, DATABASE_SOCKET: "/ruta/abs" }).database,
+  ).toEqual({
+    socketPath: "/ruta/abs",
+    user: "user",
+    password: "secret",
+    database: "test",
+  });
+  expect(() =>
+    readConfig({ DATABASE_URL, DATABASE_SOCKET: "ruta/rel" }),
+  ).toThrow(/DATABASE_SOCKET debe indicar una ruta absoluta/);
 });
 
 test("S6: serves the dashboard and assets without masking reserved routes", async () => {
