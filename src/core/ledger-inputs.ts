@@ -139,6 +139,30 @@ export const ledgerInputs = {
     limit: z.number().int().min(1).max(100).optional(),
   }),
   undoOperation: z.strictObject({ id: z.uuid() }),
+  registerLoan: z.strictObject({
+    direction: z.enum(["given", "received"]),
+    counterparty: name,
+    amount: positiveAmount,
+    currency,
+    date: accountingDate.optional(),
+    rate: z.string().regex(/^\d{1,3}(?:[.,]\d{1,6})?$/),
+    ratePeriod: z.enum(["monthly", "annual"]),
+    dueDate: accountingDate.optional(),
+    notes: note.optional(),
+    accountId: rowId.optional(),
+    withoutCash: z.boolean().optional(),
+  }),
+  payLoan: id.extend({
+    accountId: rowId,
+    amount: positiveAmount,
+    date: accountingDate.optional(),
+  }),
+  getLoan: id.extend({ date: accountingDate.optional() }),
+  listLoans: z.strictObject({
+    counterparty: name.optional(),
+    status: z.enum(["open", "closed"]).optional(),
+    date: accountingDate.optional(),
+  }),
 };
 
 export type LedgerInput<Key extends keyof typeof ledgerInputs> = z.input<
