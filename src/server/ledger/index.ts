@@ -104,11 +104,16 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       "Borrar asiento",
       (write, { id }) => entries.deleteEntry(write, id),
     ),
-    reconcile: mutate(
-      ledgerInputs.reconcile,
-      "Conciliar cuenta",
-      accounts.reconcile,
-    ),
+    async reconcile(id: string, actualBalance: string, date?: string) {
+      const input = parseLedgerInput(ledgerInputs.reconcile, {
+        id,
+        actualBalance,
+        date,
+      });
+      return writeLedger(db, writer, "Conciliar cuenta", (write) =>
+        accounts.reconcile(write, input),
+      );
+    },
     recordExchangeRate: mutate(
       ledgerInputs.recordExchangeRate,
       "Registrar tipo de cambio",
@@ -165,8 +170,10 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         entries.importEntries(write, batch, duplicates),
       );
     },
-    async undoOperation(input: LedgerInput<"undoOperation">) {
-      const { id } = parseLedgerInput(ledgerInputs.undoOperation, input);
+    async undoOperation(operationId: string) {
+      const { id } = parseLedgerInput(ledgerInputs.undoOperation, {
+        id: operationId,
+      });
       return writeLedger(
         db,
         writer,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createDatabase } from "../database.js";
@@ -248,12 +248,8 @@ export function ledgerSpecs(
 
     test("S8: reconcile the exact difference and skip a matched balance", async () => {
       const id = await account();
-      await ledger.reconcile({ id, actualBalance: "10,00", date });
-      const second = await ledger.reconcile({
-        id,
-        actualBalance: "8,99",
-        date,
-      });
+      await ledger.reconcile(id, "10,00", date);
+      const second = await ledger.reconcile(id, "8,99", date);
       expect(await postings(second!.id)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ account_id: id, amount: "-101" }),
@@ -261,9 +257,7 @@ export function ledgerSpecs(
         ]),
       );
       const before = await counts();
-      expect(
-        await ledger.reconcile({ id, actualBalance: "8,99", date }),
-      ).toBeNull();
+      expect(await ledger.reconcile(id, "8,99", date)).toBeNull();
       expect(await counts()).toEqual(before);
     });
 
@@ -289,7 +283,7 @@ export function ledgerSpecs(
         /hijas/i,
       );
       const id = await account();
-      await ledger.reconcile({ id, actualBalance: "1", date });
+      await ledger.reconcile(id, "1", date);
       await expect(ledger.archiveAccount({ id })).rejects.toThrow(/saldo/i);
     });
 
@@ -327,7 +321,7 @@ export function ledgerSpecs(
       expect(
         await ledger.getCategoryTotals({ id: target, from: date, to: date }),
       ).toEqual([{ currency: "BOB", amount: 1100n }]);
-      await ledger.undoOperation({ id: merge.operationId });
+      await ledger.undoOperation(merge.operationId);
       expect(
         withoutUpdatedAt(
           await rows(
@@ -410,7 +404,7 @@ export function ledgerSpecs(
         tags: [name("Nueva")],
       });
       const deletion = await ledger.deleteTransaction({ id: created.id });
-      const restored = await ledger.undoOperation({ id: deletion.operationId });
+      const restored = await ledger.undoOperation(deletion.operationId);
       expect(
         await rows("SELECT undoes_operation_id FROM operations WHERE id = ?", [
           restored.operationId,
@@ -422,7 +416,7 @@ export function ledgerSpecs(
           action: "update",
         }),
       ]);
-      await ledger.undoOperation({ id: edit.operationId! });
+      await ledger.undoOperation(edit.operationId!);
       expect(withoutUpdatedAt(await transactions(created.id))).toEqual(
         withoutUpdatedAt(original),
       );
@@ -432,7 +426,7 @@ export function ledgerSpecs(
           created.id,
         ]),
       ).toEqual(originalTags);
-      await ledger.undoOperation({ id: created.operationId });
+      await ledger.undoOperation(created.operationId);
       expect(await transactions(created.id)).toEqual([]);
       expect(await postings(created.id)).toEqual([]);
       expect(
@@ -452,24 +446,22 @@ export function ledgerSpecs(
         id: created.id,
         note: "Cambio posterior",
       });
-      await expect(
-        ledger.undoOperation({ id: created.operationId }),
-      ).rejects.toThrow(edit.operationId);
-      const { operationId } = await ledger.undoOperation({
-        id: edit.operationId!,
-      });
+      await expect(ledger.undoOperation(created.operationId)).rejects.toThrow(
+        edit.operationId,
+      );
+      const { operationId } = await ledger.undoOperation(edit.operationId!);
       expect(withoutUpdatedAt(await transactions(created.id))).toEqual(
         withoutUpdatedAt(original),
       );
-      await expect(
-        ledger.undoOperation({ id: edit.operationId! }),
-      ).rejects.toThrow(/deshecha/i);
-      await ledger.undoOperation({ id: operationId });
+      await expect(ledger.undoOperation(edit.operationId!)).rejects.toThrow(
+        /deshecha/i,
+      );
+      await ledger.undoOperation(operationId);
       expect((await transactions(created.id))[0].note).toBe("Cambio posterior");
       const next = await expense();
       const results = await Promise.allSettled([
-        ledger.undoOperation({ id: next.operationId }),
-        ledger.undoOperation({ id: next.operationId }),
+        ledger.undoOperation(next.operationId),
+        ledger.undoOperation(next.operationId),
       ]);
       expect(results.map((result) => result.status).sort()).toEqual([
         "fulfilled",
@@ -498,9 +490,9 @@ export function ledgerSpecs(
         note: null,
       });
       const before = await counts();
-      await expect(
-        ledger.undoOperation({ id: created.operationId }),
-      ).rejects.toThrow(later.operationId!);
+      await expect(ledger.undoOperation(created.operationId)).rejects.toThrow(
+        later.operationId!,
+      );
       expect(await counts()).toEqual(before);
     });
 
@@ -513,9 +505,9 @@ export function ledgerSpecs(
         parentId: child,
       });
       const before = await counts();
-      await expect(
-        ledger.undoOperation({ id: move.operationId }),
-      ).rejects.toThrow(later.operationId);
+      await expect(ledger.undoOperation(move.operationId)).rejects.toThrow(
+        later.operationId,
+      );
       expect(await counts()).toEqual(before);
       expect(
         await rows("SELECT parent_id FROM accounts WHERE id = ?", [child]),
@@ -538,7 +530,7 @@ export function ledgerSpecs(
           skip.operationId!,
         ]),
       ).toHaveLength(2);
-      await ledger.undoOperation({ id: skip.operationId! });
+      await ledger.undoOperation(skip.operationId!);
       for (const id of skip.created)
         expect(await transactions(id)).toHaveLength(0);
       const include = await ledger.importBatch(batch, {
