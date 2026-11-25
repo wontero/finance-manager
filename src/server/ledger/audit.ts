@@ -7,6 +7,7 @@ import {
   type Selectable,
   type Transaction,
 } from "kysely";
+import { archivedAccountWithBalance } from "./queries.js";
 import { systemAccounts, type Actor, type LedgerDatabase } from "./schema.js";
 
 const primaryKeys = {
@@ -32,6 +33,13 @@ type Reversal = {
   after: Snapshot | null;
   rowId: string;
 };
+const foreignKeys = [
+  ["accounts", "parent_id", "accounts"],
+  ["postings", "account_id", "accounts"],
+  ["postings", "transaction_id", "transactions"],
+  ["transaction_tags", "transaction_id", "transactions"],
+  ["transaction_tags", "tag_id", "tags"],
+] as const; // Solo referencias a filas que el dominio puede borrar al deshacer.
 
 function where<T extends Table>(table: T, key: Key<T>) {
   return sql.join(
@@ -56,11 +64,10 @@ function snapshot(row: object) {
 
 function sameState(current: Snapshot | null, expected: Snapshot | null) {
   if (!current || !expected) return current === expected;
-  const a = { ...current };
-  const b = { ...expected };
-  delete a.updated_at;
-  delete b.updated_at;
-  return isDeepStrictEqual(a, b);
+  return Object.entries(expected).every(
+    ([column, value]) =>
+      column === "updated_at" || isDeepStrictEqual(current[column], value),
+  );
 }
 
 function parseSnapshot(value: string | null) {
@@ -281,21 +288,83 @@ export class LedgerWrite {
     }
   }
 
+  private async foreignKeyOperation(
+    { table, before, rowId }: Reversal,
+    seq: string,
+    code: "ER_ROW_IS_REFERENCED_2" | "ER_NO_REFERENCED_ROW_2",
+  ) {
+    let audit = this.db
+      .selectFrom("audit_log as a")
+      .innerJoin("operations as o", "o.id", "a.operation_id")
+      .select(["a.operation_id", "a.action"])
+      .where("o.seq", ">", seq)
+      .orderBy("a.id", "desc")
+      .limit(1);
+    if (this.operationId !== null)
+      audit = audit.where("a.operation_id", "!=", this.operationId);
+    for (const [child, column, parent] of foreignKeys) {
+      if (code === "ER_ROW_IS_REFERENCED_2" && parent === table) {
+        const ref = sql.ref(`r.${column}`);
+        const path = `$.${column}`;
+        const rowKey = sql`CONCAT_WS('/', ${sql.join(primaryKeys[child].map((key) => sql.ref(`r.${key}`)))})`;
+        const blocker = await audit
+          .where(
+            sql<boolean>`EXISTS (SELECT 1 FROM ${sql.table(child)} AS r
+              WHERE ${ref} = ${rowId} AND ${rowKey} = a.row_id)`,
+          )
+          .where("a.table_name", "=", child)
+          .where(sql<boolean>`JSON_VALUE(a.after, ${path}) = ${rowId}`)
+          .where(
+            sql<boolean>`NOT (JSON_VALUE(a.before, ${path}) <=> JSON_VALUE(a.after, ${path}))`,
+          )
+          .executeTakeFirst();
+        if (blocker) return blocker.operation_id;
+      }
+      if (code === "ER_NO_REFERENCED_ROW_2" && child === table) {
+        const id = before?.[column];
+        if (typeof id !== "string" || (await this.row(parent, { id })))
+          continue;
+        const removal = await audit
+          .where("a.table_name", "=", parent)
+          .where("a.row_id", "=", id)
+          .executeTakeFirst();
+        if (removal?.action === "delete") return removal.operation_id;
+      }
+    }
+  }
+
   async undo(id: string) {
     const target = await this.db
       .selectFrom("operations")
-      .select("seq")
+      .select(["seq", "undoes_operation_id"])
       .where("id", "=", id)
       .forUpdate()
       .executeTakeFirst();
     if (!target) throw new Error(`No existe la operación ${id}.`);
-    const undone = await this.db
-      .selectFrom("operations")
-      .select("id")
-      .where("undoes_operation_id", "=", id)
-      .executeTakeFirst();
-    if (undone)
-      throw new Error(`La operación ${id} ya fue deshecha por ${undone.id}.`);
+    const reversalOf = (operationId: string) =>
+      this.db
+        .selectFrom("operations")
+        .select("id")
+        .where("undoes_operation_id", "=", operationId)
+        .executeTakeFirst();
+    const direct = await reversalOf(id);
+    if (direct) {
+      let latest = direct.id;
+      let undone = true;
+      for (
+        let next = await reversalOf(latest);
+        next;
+        next = await reversalOf(latest)
+      ) {
+        latest = next.id;
+        undone = !undone;
+      }
+      throw new Error(
+        undone
+          ? `La operación ${id} ya fue deshecha por ${latest}.`
+          : `La operación ${id} ya fue rehecha. Para revertirla, usa deshacer ${latest}.`,
+      );
+    }
 
     const log = await this.db
       .selectFrom("audit_log")
@@ -303,7 +372,7 @@ export class LedgerWrite {
       .where("operation_id", "=", id)
       .orderBy("id", "desc")
       .execute();
-    if (!log.length)
+    if (!log.length && target.undoes_operation_id === null)
       throw new Error(`La operación ${id} no tiene cambios en la bitácora.`);
     const conflicts: string[] = [];
     const changes: Reversal[] = [];
@@ -318,11 +387,10 @@ export class LedgerWrite {
         throw new Error(
           `La bitácora tiene una clave inválida en ${table}/${item.row_id}.`,
         );
-      const current = await this.row(table, key);
-      const later = await this.laterChange(
-        item,
-        sameState(current ? snapshot(current) : null, after),
-      );
+      const row = await this.row(table, key);
+      const current = row ? snapshot(row) : null;
+      if (after === null && sameState(current, before)) continue;
+      const later = await this.laterChange(item, sameState(current, after));
       if (later) conflicts.push(`${table}/${item.row_id} (${later})`);
       changes.push({ table, key, before, after, rowId: item.row_id });
     }
@@ -332,27 +400,52 @@ export class LedgerWrite {
       );
     await this.checkRestoredParents(changes, target.seq);
 
-    for (const { table, key, before, after, rowId } of changes) {
+    const retainedTags: Row<"tags">[] = [];
+    for (const change of changes) {
+      const { table, key, before, after, rowId } = change;
       try {
         if (before === null) await this.delete(table, key);
         else if (after === null) await this.insertRow(table, before);
         else await this.updateRow(table, key, before);
       } catch (error) {
+        const code = errorCode(error);
         if (
-          [
-            "ER_ROW_IS_REFERENCED_2",
-            "ER_NO_REFERENCED_ROW_2",
-            "ER_DUP_ENTRY",
-          ].includes(String(errorCode(error)))
-        )
+          table === "tags" &&
+          before === null &&
+          code === "ER_ROW_IS_REFERENCED_2"
+        ) {
+          const tag = await this.row("tags", { id: rowId });
+          if (tag) {
+            retainedTags.push({ id: tag.id, name: tag.name });
+            continue;
+          }
+        }
+        if (
+          code === "ER_ROW_IS_REFERENCED_2" ||
+          code === "ER_NO_REFERENCED_ROW_2"
+        ) {
+          const operation = await this.foreignKeyOperation(
+            change,
+            target.seq,
+            code,
+          );
+          const detail = operation
+            ? `Operación posterior: ${operation}.`
+            : "No consta una operación posterior en la bitácora.";
           throw new Error(
-            `No se puede restaurar ${table}/${rowId}: hay filas relacionadas o una clave ya ocupada.`,
+            `No se puede restaurar ${table}/${rowId}: hay un conflicto con una fila relacionada. ${detail}`,
+            { cause: error },
+          );
+        }
+        if (code === "ER_DUP_ENTRY")
+          throw new Error(
+            `No se puede restaurar ${table}/${rowId}: la clave ya está ocupada.`,
             { cause: error },
           );
         throw error;
       }
     }
-    return { operationId: await this.operation() };
+    return { operationId: await this.operation(), retainedTags };
   }
 }
 
@@ -378,7 +471,16 @@ export async function writeLedger<T>(
           .executeTakeFirst();
         if (!root?.is_system)
           throw new Error("Falta la raíz contable Ingresos.");
-        return run(new LedgerWrite(trx, actor, description, undoes));
+        const write = new LedgerWrite(trx, actor, description, undoes);
+        const result = await run(write);
+        if (write.operationId !== null) {
+          const account = await archivedAccountWithBalance(trx);
+          if (account)
+            throw new Error(
+              `La cuenta archivada "${account.name}" debe tener saldo cero. Desarchívala o deshaz primero el archivado.`,
+            );
+        }
+        return result;
       });
   } catch (error) {
     if (errorCode(error) === "ER_DUP_ENTRY")

@@ -20,9 +20,14 @@ export function assertStorageAmount(amount: bigint) {
 export function parseAmount(text: unknown, minorUnit: number) {
   if (typeof text !== "string")
     throw new Error("El monto debe ser un texto decimal.");
-  const normalized = /^-?(?:\d{1,3}(?:\.\d{3})+|\d+),\d+$/.test(text)
-    ? text.replaceAll(".", "").replace(",", ".")
-    : text;
+  const trimmed = text.trim();
+  if (/^-?\d+[.,]\d{3}$/.test(trimmed))
+    throw new Error(
+      'Formato ambiguo. Usa un formato como "1.234,00" o "1234.00".',
+    );
+  const normalized = /^-?(?:\d{1,3}(?:\.\d{3})+|\d+),\d+$/.test(trimmed)
+    ? trimmed.replaceAll(".", "").replace(",", ".")
+    : trimmed;
   const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(normalized);
   if (!match || match[0] !== normalized)
     throw new Error("Formato de monto inválido.");

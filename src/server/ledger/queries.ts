@@ -14,6 +14,18 @@ function currentPostings(db: Kysely<LedgerDatabase>) {
     .where("t.deleted_at", "is", null);
 }
 
+export function archivedAccountWithBalance(db: Kysely<LedgerDatabase>) {
+  return currentPostings(db)
+    .innerJoin("accounts as a", "a.id", "p.account_id")
+    .select("a.name")
+    .where("a.kind", "in", ["asset", "liability"])
+    .where("a.archived_at", "is not", null)
+    .groupBy(["a.id", "a.name"])
+    .having(sql<string>`SUM(p.amount)`, "!=", "0")
+    .limit(1)
+    .executeTakeFirst();
+}
+
 export async function getAccountTotal(
   db: Kysely<LedgerDatabase>,
   id: string,

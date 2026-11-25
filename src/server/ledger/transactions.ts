@@ -260,6 +260,19 @@ async function activeEntry(db: Kysely<LedgerDatabase>, id: string) {
     .where("deleted_at", "is", null)
     .executeTakeFirst();
   if (!entry) throw new Error(`El asiento ${id} no existe o está borrado.`);
+  const archived = await db
+    .selectFrom("postings as p")
+    .innerJoin("accounts as a", "a.id", "p.account_id")
+    .select("a.name")
+    .where("p.transaction_id", "=", id)
+    .where("a.kind", "in", ["asset", "liability"])
+    .where("a.archived_at", "is not", null)
+    .limit(1)
+    .executeTakeFirst();
+  if (archived)
+    throw new Error(
+      `El asiento usa la cuenta archivada "${archived.name}". Desarchívala o deshaz primero el archivado.`,
+    );
 }
 
 export async function editEntry(

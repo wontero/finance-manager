@@ -9,7 +9,7 @@ export const accountingDate = z.iso
   .date()
   .refine((date) => date >= "1000-01-01");
 const currency = z.string().regex(/^[A-Z]{3}$/);
-const amount = z.string().min(1).max(280);
+const amount = z.string().trim().min(1).max(280);
 const positiveAmount = amount.refine((value) => /^\d/.test(value));
 const text = (max: number) => z.string().trim().min(1).max(max);
 const name = text(160);

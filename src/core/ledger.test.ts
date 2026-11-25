@@ -25,3 +25,11 @@ test("M-004 S2: conversion is exact and rounds ties away from zero", () => {
   expect(convert(-1n, "0.5")).toBe(-1n);
   expect(convert(9007199254740993n, "1")).toBe(9007199254740993n);
 });
+
+test("S23: trim amounts and explain ambiguous separators", () => {
+  expect(parseAmount(" 45 ", 2)).toBe(4500n);
+  for (const input of ["1.234", "1,000"])
+    expect(() => parseAmount(input, 2)).toThrow(
+      /formato ambiguo.*1\.234,00.*1234\.00/i,
+    );
+});

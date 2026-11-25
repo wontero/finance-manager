@@ -139,10 +139,7 @@ export async function moveAccount(
 
 export async function archiveAccount(write: LedgerWrite, id: string) {
   const account = await mutableAccount(write, id);
-  if (account.kind === "asset" || account.kind === "liability") {
-    if ((await getAccountTotal(write.db, id)) !== 0n)
-      throw new Error("La cuenta debe tener saldo cero para archivarse.");
-  } else {
+  if (account.kind !== "asset" && account.kind !== "liability") {
     const child = await write.db
       .selectFrom("accounts")
       .select("id")
@@ -160,6 +157,8 @@ export async function mergeCategories(
   sourceId: string,
   targetId: string,
 ) {
+  if (sourceId === targetId)
+    throw new Error("No se puede fusionar una categoría consigo misma.");
   const source = await mutableAccount(write, sourceId);
   const target = await mutableAccount(write, targetId);
   if (
@@ -168,6 +167,18 @@ export async function mergeCategories(
   )
     throw new Error("Solo se pueden fusionar categorías del mismo tipo.");
   await rejectCycle(write, sourceId, targetId);
+  const conflict = await write.db
+    .selectFrom("accounts as child")
+    .innerJoin("accounts as sibling", "child.name", "sibling.name")
+    .select("child.name")
+    .where("child.active_parent_id", "=", sourceId)
+    .where("sibling.active_parent_id", "=", targetId)
+    .limit(1)
+    .executeTakeFirst();
+  if (conflict)
+    throw new Error(
+      `La categoría de destino ya tiene una hija llamada "${conflict.name}".`,
+    );
   const postings = await write.db
     .selectFrom("postings")
     .select("id")

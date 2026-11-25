@@ -1,4 +1,4 @@
-﻿import {
+import {
   actorInput,
   ledgerInputs,
   parseLedgerInput,

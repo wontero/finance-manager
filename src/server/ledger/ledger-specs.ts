@@ -1,4 +1,4 @@
-﻿import { randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createDatabase } from "../database.js";
@@ -137,6 +137,7 @@ export function ledgerSpecs(
           ],
           /moneda/i,
         ],
+        [[{ ...credit, currency: "EUR" }, debit], /no existe la moneda EUR/i],
         [[{ ...credit, accountId: archived }, debit], /archivada/i],
         [[credit, { ...debit, accountId: expenses }], /raíz/i],
         [[credit, { ...debit, accountId: income }], /raíz/i],
@@ -147,7 +148,7 @@ export function ledgerSpecs(
     });
 
     test("S5: record an expense with complete audit rows", async () => {
-      const result = await expense();
+      const result = await expense(" 45,00 ");
       const lines = await postings(result.id);
       expect(lines).toHaveLength(2);
       expect(lines).toEqual(
@@ -285,6 +286,27 @@ export function ledgerSpecs(
       const id = await account();
       await ledger.reconcile(id, "1", date);
       await expect(ledger.archiveAccount({ id })).rejects.toThrow(/saldo/i);
+    });
+
+    test("S8/S23: reconcile a liability using its natural balance", async () => {
+      const { id } = await ledger.createAccount({
+        name: name("Tarjeta"),
+        kind: "liability",
+        subtype: "tarjeta_credito",
+        currency: "BOB",
+        opening: { amount: "10,00", date },
+      });
+      const change = await ledger.reconcile(id, " 8,99 ", date);
+      expect(await postings(change!.id)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ account_id: id, amount: "101" }),
+          expect.objectContaining({ account_id: adjustment, amount: "-101" }),
+        ]),
+      );
+      expect(await ledger.getBalance({ id, date })).toMatchObject({
+        amount: 899n,
+      });
+      expect(await ledger.reconcile(id, "8,99", date)).toBeNull();
     });
 
     test("S10: merge reassigns postings and children, and undo restores both", async () => {
@@ -761,6 +783,8 @@ export function ledgerSpecs(
           JSON.parse((await audit(change.operationId))[0].after).custom,
         ),
       ).toEqual({ alias: "Billetera" });
+      await ledger.undoOperation(second.operationId);
+      await ledger.undoOperation(first.operationId);
     });
 
     test("S19: a real mid-write audit failure rolls back domain rows and the operation", async () => {
@@ -775,6 +799,234 @@ export function ledgerSpecs(
         expect(await counts()).toEqual(before);
       } finally {
         await migration.query("DROP TRIGGER ledger_s19");
+      }
+    });
+
+    test.each(["delete", "edit", "undo"] as const)(
+      "S21: %s cannot change an archived account balance",
+      async (action) => {
+        const label = name("Cuenta archivada");
+        const classification =
+          action === "edit"
+            ? ({ kind: "liability", subtype: "tarjeta_credito" } as const)
+            : ({ kind: "asset", subtype: "efectivo" } as const);
+        const { id } = await ledger.createAccount({
+          name: label,
+          ...classification,
+          currency: "BOB",
+        });
+        const other = await account();
+        const entry = await ledger.recordExpense({
+          accountId: id,
+          categoryId: food,
+          amount: "45",
+          date,
+          description: "Compra",
+        });
+        await ledger.reconcile(id, "0", date);
+        const archive = await ledger.archiveAccount({ id });
+        const run = () => {
+          if (action === "undo") return ledger.undoOperation(entry.operationId);
+          if (action === "delete")
+            return ledger.deleteTransaction({ id: entry.id });
+          const replacement = draft();
+          replacement.lines[0].accountId = other;
+          return ledger.editTransaction({
+            id: entry.id,
+            lines: replacement.lines,
+          });
+        };
+        const before = await counts();
+        const original = await transactions(entry.id);
+        const originalLines = await postings(entry.id);
+        await expect(run()).rejects.toThrow(
+          new RegExp(label + ".*desarchívala", "i"),
+        );
+        await expect(
+          ledger.editTransaction({ id: entry.id, note: "Solo la nota" }),
+        ).rejects.toThrow(label);
+        expect(await counts()).toEqual(before);
+        expect(await transactions(entry.id)).toEqual(original);
+        expect(await postings(entry.id)).toEqual(originalLines);
+        expect(await ledger.getBalance({ id, date })).toMatchObject({
+          amount: 0n,
+        });
+        await ledger.undoOperation(archive.operationId);
+        await run();
+        expect(await ledger.getBalance({ id, date })).toMatchObject({
+          amount: action === "edit" ? -4500n : 4500n,
+        });
+      },
+    );
+
+    test("S22: undo, redo and undo a batch while keeping a shared tag", async () => {
+      const batch = await ledger.importBatch(
+        [draft("71"), draft("72"), draft("73")].map((entry) => ({
+          ...entry,
+          tags: ["Viaje"],
+        })),
+        { duplicates: "include" },
+      );
+      const later = await ledger.createTransaction({
+        ...draft("74"),
+        tags: ["viaje"],
+      });
+      const [tag] = await rows("SELECT * FROM tags WHERE name = 'Viaje'");
+      const undid = await ledger.undoOperation(batch.operationId!);
+      expect(undid).toMatchObject({ retainedTags: [tag] });
+      for (const id of batch.created)
+        expect(await transactions(id)).toEqual([]);
+      expect(
+        await rows("SELECT * FROM transaction_tags WHERE tag_id = ?", [tag.id]),
+      ).toEqual([{ transaction_id: later.id, tag_id: tag.id }]);
+      const redid = await ledger.undoOperation(undid.operationId);
+      for (const id of batch.created) {
+        expect(await transactions(id)).toHaveLength(1);
+        expect(
+          await rows(
+            "SELECT tag_id FROM transaction_tags WHERE transaction_id = ?",
+            [id],
+          ),
+        ).toEqual([{ tag_id: tag.id }]);
+      }
+      await ledger.undoOperation(redid.operationId);
+      for (const id of batch.created)
+        expect(await transactions(id)).toEqual([]);
+      expect(await rows("SELECT * FROM tags WHERE id = ?", [tag.id])).toEqual([
+        tag,
+      ]);
+    });
+
+    test("S22: a later posting identifies the operation that blocks undo", async () => {
+      const entry = await expense();
+      const accountId = await ledger.createAccount({
+        name: name("Cuenta referenciada"),
+        kind: "asset",
+        subtype: "efectivo",
+        currency: "BOB",
+      });
+      const replacement = draft();
+      replacement.lines[0].accountId = accountId.id;
+      const later = await ledger.editTransaction({
+        id: entry.id,
+        lines: replacement.lines,
+      });
+      const before = await counts();
+      await expect(ledger.undoOperation(accountId.operationId)).rejects.toThrow(
+        later.operationId!,
+      );
+      expect(await counts()).toEqual(before);
+    });
+
+    test("S22: redo accepts a tag already reinserted with the same state", async () => {
+      const created = await ledger.createTransaction({
+        ...draft(),
+        tags: [name("Etiqueta recuperada")],
+      });
+      const tagInsert = (await audit(created.operationId)).find(
+        (row) => row.table_name === "tags",
+      )!;
+      const tag = JSON.parse(tagInsert.after);
+      const undo = await ledger.undoOperation(created.operationId);
+      await connections().migration.execute(
+        "INSERT INTO tags (id, name) VALUES (?, ?)",
+        [tag.id, tag.name],
+      );
+      const redo = await ledger.undoOperation(undo.operationId);
+      expect(
+        await rows(
+          "SELECT tag_id FROM transaction_tags WHERE transaction_id = ?",
+          [created.id],
+        ),
+      ).toEqual([{ tag_id: tag.id }]);
+      await ledger.undoOperation(redo.operationId);
+      expect(await transactions(created.id)).toEqual([]);
+      expect(await rows("SELECT * FROM tags WHERE id = ?", [tag.id])).toEqual([
+        tag,
+      ]);
+    });
+
+    test("S22: a later tag association identifies the operation that blocks undo", async () => {
+      const entry = await expense();
+      const later = await ledger.editTransaction({
+        id: entry.id,
+        tags: [name("Etiqueta posterior")],
+      });
+      const before = await counts();
+      await expect(ledger.undoOperation(entry.operationId)).rejects.toThrow(
+        later.operationId!,
+      );
+      expect(await counts()).toEqual(before);
+      expect(await postings(entry.id)).toHaveLength(2);
+    });
+
+    test("S22: undo identifies the later removal of an account needed by a posting", async () => {
+      const source = await ledger.createAccount({
+        name: name("Cuenta eliminada"),
+        kind: "asset",
+        subtype: "efectivo",
+        currency: "BOB",
+      });
+      const initial = draft();
+      initial.lines[0].accountId = source.id;
+      const entry = await ledger.createTransaction(initial);
+      const edited = await ledger.editTransaction({
+        id: entry.id,
+        lines: draft().lines,
+      });
+      const removed = await ledger.undoOperation(source.operationId);
+      const before = await postings(entry.id);
+      await expect(ledger.undoOperation(edited.operationId!)).rejects.toThrow(
+        removed.operationId,
+      );
+      expect(await postings(entry.id)).toEqual(before);
+    });
+
+    test("S24: identify the latest reversal and the conflicting category", async () => {
+      const entry = await expense();
+      const undo = await ledger.undoOperation(entry.operationId);
+      const redo = await ledger.undoOperation(undo.operationId);
+      await expect(ledger.undoOperation(entry.operationId)).rejects.toThrow(
+        new RegExp("deshacer " + redo.operationId, "i"),
+      );
+
+      const sourceId = await category();
+      const targetId = await category();
+      const childName = name("Hija homónima");
+      await ledger.createCategory({ name: childName, parentId: sourceId });
+      await ledger.createCategory({
+        name: childName.toLowerCase(),
+        parentId: targetId,
+      });
+      const before = await counts();
+      await expect(
+        ledger.mergeCategories({ sourceId, targetId }),
+      ).rejects.toThrow(childName);
+      await expect(
+        ledger.mergeCategories({ sourceId, targetId: sourceId }),
+      ).rejects.toThrow(/no se puede fusionar una categoría consigo misma/i);
+      expect(await counts()).toEqual(before);
+    });
+
+    test("S25: undo older snapshots and reinsert rows with the new default", async () => {
+      const entry = await expense();
+      const undo = await ledger.undoOperation(entry.operationId);
+      const another = await expense();
+      const migration = connections().migration;
+      await migration.query(
+        "ALTER TABLE transactions ADD COLUMN future_field INT NOT NULL DEFAULT 42",
+      );
+      try {
+        await ledger.undoOperation(another.operationId);
+        expect(await transactions(another.id)).toEqual([]);
+        await ledger.undoOperation(undo.operationId);
+        expect(await transactions(entry.id)).toEqual([
+          expect.objectContaining({ future_field: 42 }),
+        ]);
+      } finally {
+        await migration.query(
+          "ALTER TABLE transactions DROP COLUMN future_field",
+        );
       }
     });
   });
