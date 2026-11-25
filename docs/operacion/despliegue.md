@@ -255,6 +255,8 @@ Veinte fallos en una hora pueden bloquear temporalmente nuevos inicios de sesió
 
    Comprueba que ambos listados muestran el mismo `finanzas-AAAAMMDD-HHMMSS.sql.gz.gpg`. Cada destino conserva un archivo por cada uno de los 30 días más recientes con copia y el primer archivo disponible de cada mes entre el actual y los 11 anteriores. Los archivos pueden cumplir ambos criterios. Si falla la subida, el script conserva la copia local y aplica la retención local. Revisa el log y sube el archivo retenido con `rclone copy` tras corregir la causa.
 
+   La retención remota usa `rclone deletefile`, que por defecto envía las copias vencidas a la papelera de Drive. Siguen ocupando cuota hasta que se eliminan definitivamente. Si necesitas liberar espacio, abre **Papelera** en Drive, selecciona las copias vencidas y elige **Eliminar definitivamente**. Usa **Vaciar papelera** solo si también quieres borrar el resto de su contenido. [Documentación de rclone](https://rclone.org/drive/#deleting-files) · [Ayuda de Google Drive](https://support.google.com/drive/answer/2375102?hl=es)
+
 ## 8. Programa el cron de cPanel
 
 En **Advanced → Cron Jobs**, comprueba el correo de **Cron Email**. En la terminal usa `crontab -e` para añadir la zona horaria y la tarea a las existentes. Sustituye la dirección de ejemplo y confirma que la ruta raíz coincide con tu cuenta. Con Cronie, `CRON_TZ` determina la hora de las líneas siguientes. Coloca este bloque al final para preservar la zona y el correo de las otras tareas. [Cron Jobs de cPanel](https://docs.cpanel.net/cpanel/advanced/cron-jobs/), [Manual de Cronie](https://man7.org/linux/man-pages/man5/crontab.5%40%40cronie.html)
@@ -326,7 +328,7 @@ tail -f "$session_log"
 
 También puedes pasar una rama, etiqueta o SHA que el remoto exponga. El script construye la release antes de mover `current`, comprueba que responde esa release y vuelve a la anterior si falla. En un despliegue normal y en un rollback exige HTTP 200 y la cabecera de la release esperada. Si `shared/.env` define `DATABASE_URL`, exige además `db: "ok"` en el JSON. Conserva hasta cinco releases, incluidas la activa y la anterior.
 
-Para volver a la release anterior, ejecuta `bash "$app_dir/current/src/deploy/deploy.sh" --rollback`. El script muestra el origen y el destino. Escribe `s` para confirmar o pulsa **Enter** para cancelar. Usa `--rollback --yes` si necesitas confirmar desde un proceso sin terminal. Cada rollback exitoso intercambia la release activa y `previous`. Dos seguidos vuelven al punto de partida.
+Para volver a la release anterior, ejecuta `bash "$app_dir/current/src/deploy/deploy.sh" --rollback`. El script muestra el origen y el destino. Escribe `s` para confirmar o pulsa **Enter** para cancelar. Si las releases cambian mientras confirmas, ejecuta de nuevo el comando para revisar el nuevo destino. Usa `--rollback --yes` si necesitas confirmar desde un proceso sin terminal. Cada rollback exitoso intercambia la release activa y `previous`. Dos seguidos vuelven al punto de partida.
 
 Si se corta SSH, vuelve a conectarte y recupera la sesión con `tmux attach -t finanzas` o `screen -r finanzas`. Con `nohup`, revisa el PID que anotaste con `ps -p PID` y lee el log indicado. Espera a que termine antes de reintentar. Si el proceso ya terminó, compara `readlink "$app_dir/current"` y `readlink "$app_dir/shared/previous"` con la cabecera y el JSON de `/health`. Si el corte ocurrió durante una migración, verifica su resultado y la copia en `shared/backups` antes de repetir el despliegue o restaurar la base.
 

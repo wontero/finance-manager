@@ -109,34 +109,51 @@ reject_active_bootstrap() {
     fail 'La aplicación ya tiene una release activa.'
 }
 
-[[ -e $lock ]] || reject_active_bootstrap
-mkdir -p -- "$root"
-wait_for_deploy_lock
-
 release_path() {
   [[ ${1%/*} == "$releases" && ${1##*/} =~ ^[0-9]{8}-[0-9]{6}$ && -d $1 && ! -L $1 ]]
 }
 
-active=$(readlink -- "$current" || true)
-prior=$(readlink -- "$previous" || true)
-for link in "$current" "$previous"; do
-  [[ ! -e $link || -L $link ]] || fail 'current y previous deben ser enlaces del despliegue.'
-done
-if [[ -n $active ]]; then
-  release_path "$active" || fail 'current no apunta a una release válida.'
+read_release_links() {
+  local link
+  active=$(readlink -- "$current" || true)
+  prior=$(readlink -- "$previous" || true)
+  for link in "$current" "$previous"; do
+    [[ ! -e $link || -L $link ]] || fail 'current y previous deben ser enlaces del despliegue.'
+  done
+  if [[ -n $active ]]; then
+    release_path "$active" || fail 'current no apunta a una release válida.'
+  fi
+  if [[ -n $prior ]]; then
+    release_path "$prior" || fail 'previous no apunta a una release válida.'
+  fi
+}
+
+show_rollback() {
+  [[ -n $active && -n $prior && $active != "$prior" ]] || fail 'No hay una release anterior para restaurar.'
+  echo "Rollback de ${active##*/} a ${prior##*/}."
+}
+
+if [[ $mode == --rollback && ${2:-} != --yes ]]; then
+  read_release_links
+  show_rollback
+  [[ -t 0 ]] || fail 'Confirma el rollback en una terminal o pasa --yes.'
+  read -r -p '¿Confirmas el rollback? [s/N] ' answer && [[ $answer == [sS] ]] ||
+    fail 'Rollback cancelado.'
+  confirmed_active=$active
+  confirmed_prior=$prior
 fi
-if [[ -n $prior ]]; then
-  release_path "$prior" || fail 'previous no apunta a una release válida.'
-fi
+
+[[ -e $lock ]] || reject_active_bootstrap
+mkdir -p -- "$root"
+wait_for_deploy_lock
+read_release_links
 reject_active_bootstrap
 
 if [[ $mode == --rollback ]]; then
-  [[ -n $active && -n $prior && $active != "$prior" ]] || fail 'No hay una release anterior para restaurar.'
-  echo "Rollback de ${active##*/} a ${prior##*/}."
-  if [[ ${2:-} != --yes ]]; then
-    [[ -t 0 ]] || fail 'Confirma el rollback en una terminal o pasa --yes.'
-    read -r -p '¿Confirmas el rollback? [s/N] ' answer && [[ $answer == [sS] ]] ||
-      fail 'Rollback cancelado.'
+  if [[ ${2:-} == --yes ]]; then
+    show_rollback
+  elif [[ $active != "$confirmed_active" || $prior != "$confirmed_prior" ]]; then
+    fail 'Las releases cambiaron mientras se confirmaba el rollback. Ejecuta el comando y vuelve a confirmar.'
   fi
 fi
 

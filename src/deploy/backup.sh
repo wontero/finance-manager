@@ -17,7 +17,8 @@ esac
 
 root=$(realpath -m -- "${DEPLOY_ROOT:-$HOME/apps/finanzasmateo}")
 shared=$(realpath -m -- "${DEPLOY_SHARED_DIR:-$root/shared}")
-daily="$shared/backups/daily"
+backups="$shared/backups"
+daily="$backups/daily"
 lock="$root/.deploy.lock"
 repo_url=
 archive_pattern='^finanzas-[0-9]{8}-[0-9]{6}\.sql\.gz\.gpg$'
@@ -55,6 +56,10 @@ if [[ $1 != verify ]]; then
   [[ $database =~ ^[a-zA-Z0-9_]+$ && -f $options && -r $options ]] ||
     fail 'Configura DEPLOY_DB_NAME y el archivo de opciones de MariaDB.'
   options=$(realpath -s -- "$options")
+  if [[ $1 == restore && ${3:-} != --yes ]]; then
+    printf 'Escribe %s para confirmar que se reemplazarán sus objetos: ' "$database" >&2
+    IFS= read -r answer && [[ $answer == "$database" ]] || fail 'Restauración cancelada.'
+  fi
   mkdir -p -- "$root"
   wait_for_deploy_lock
 fi
@@ -104,11 +109,10 @@ case "$1" in
     echo 'Copia verificada.'
     exit 0 ;;
   restore)
-    if [[ ${3:-} != --yes ]]; then
-      printf 'Escribe %s para confirmar que se reemplazarán sus objetos: ' "$database" >&2
-      IFS= read -r answer && [[ $answer == "$database" ]] || fail 'Restauración cancelada.'
-    fi
-    temporary=$(mktemp "${TMPDIR:-/tmp}/finance-restore.XXXXXX.sql")
+    [[ ! -L $backups ]] || fail 'shared/backups debe ser un directorio local.'
+    install -d -m 700 -- "$backups"
+    find "$backups" -maxdepth 1 -type f -name 'finance-restore.*' -delete
+    temporary=$(mktemp "$backups/finance-restore.XXXXXX.sql")
     if ! unpack > "$temporary" || ! verify_dump 0 "$temporary"; then
       backup_error 'No se pudo verificar la copia antes de restaurar. Comprueba la frase, el archivo y la sección de triggers.'
       exit 1
@@ -127,6 +131,7 @@ remote=${BACKUP_RCLONE_REMOTE:-}
   fail 'Configura BACKUP_RCLONE_REMOTE con un remoto de rclone nombrado.'
 
 install -d -m 700 -- "$daily"
+find "$daily" -maxdepth 1 -type f -name '.finanzas-*' ! -newermt '24 hours ago' -delete
 file="$daily/finanzas-$timestamp.sql.gz.gpg"
 temporary=$(mktemp "$daily/.finanzas-$timestamp.XXXXXX")
 if ! { backup= backup_database && printf '%s\n' '-- FinanceManager: fin de triggers'; } |

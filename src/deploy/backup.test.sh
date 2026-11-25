@@ -70,6 +70,14 @@ case $tool in
       fi
     else
       [[ $* == *--decrypt* ]]
+      if [[ ${CHECK_RESTORE_TEMP:-0} == 1 ]]; then
+        backups="$DEPLOY_ROOT/shared/backups"
+        shopt -s nullglob
+        temps=("$backups"/finance-restore.*)
+        [[ ${#temps[@]} == 1 && -f ${temps[0]} && ! -L ${temps[0]} &&
+           ! -e $backups/finance-restore.interrumpido.sql &&
+           $(stat -c %a "$backups") == 700 && $(stat -c %a "${temps[0]}") == 600 ]]
+      fi
       { read -r header; [[ $header == ENC && ${BAD_PHRASE:-0} == 0 ]] && cat; } < "${!#}"
     fi ;;
   my_print_defaults) ;;
@@ -146,6 +154,41 @@ printf 'finance_test\n' | backup restore "$file"
   fail 'S5: faltó importar a través de restore_database'
 no_plaintext || fail 'S5: quedó el volcado temporal tras restaurar'
 echo 'PASA M-007 S5'
+
+backups="$shared/backups"
+chmod 755 "$backups"
+touch "$backups/finance-restore.interrumpido.sql"
+CHECK_RESTORE_TEMP=1 backup restore "$file" --yes || fail 'M-007B S12: ubicación, permisos o limpieza previa del temporal'
+temps=("$backups"/finance-restore.*)
+[[ ${#temps[@]} == 0 ]] && no_plaintext || fail 'M-007B S12: quedó un volcado en claro'
+echo 'PASA M-007B S12'
+
+mkfifo "$fixture/answer"
+exec 8<>"$fixture/answer"
+: > "$fixture/prompt"
+timeout 10 bash "$script" restore "$file" <&8 >"$fixture/prompt" 2>&1 &
+restore_pid=$!
+for _ in {1..200}; do
+  if grep -q 'Escribe finance_test' "$fixture/prompt"; then break; fi
+  sleep 0.02
+done
+grep -q 'Escribe finance_test' "$fixture/prompt" || fail 'M-007B S13: no pidió confirmación'
+"$REAL_FLOCK" -n "$DEPLOY_ROOT/.deploy.lock" true || fail 'M-007B S13: restore tomó el lock antes de confirmar'
+printf 'finance_test\n' >&8
+wait "$restore_pid" || fail 'M-007B S13: restore no completó tras confirmar'
+exec 8>&-
+echo 'PASA M-007B S13 restore'
+
+touch -d '25 hours ago' "$daily/.finanzas-old" "$daily/manual"
+touch "$daily/.finanzas-recent"
+ln -s "$daily/manual" "$daily/.finanzas-link"
+touch -h -d '25 hours ago' "$daily/.finanzas-link"
+if FAIL_STAGE=dump backup run >"$fixture/out" 2>&1; then fail 'M-007B S14: aceptó fallo de volcado'; fi
+[[ ! -e $daily/.finanzas-old && -f $daily/.finanzas-recent &&
+   -L $daily/.finanzas-link && -f $daily/manual ]] ||
+  fail 'M-007B S14: limpieza incorrecta de temporales'
+rm -- "$daily/.finanzas-recent" "$daily/.finanzas-link" "$daily/manual"
+echo 'PASA M-007B S14'
 
 seed() {
   for (( i = 1; i < 400; i++ )); do

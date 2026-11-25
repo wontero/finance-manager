@@ -211,6 +211,38 @@ deploy --rollback --yes
 [[ $(current) == "$active" ]] || fail 'S13: doble rollback no volvió a la release original'
 echo 'PASA S13'
 
+mkfifo "$fixture/answer"
+exec 8<>"$fixture/answer"
+start_rollback() {
+  : > "$fixture/prompt"
+  timeout 10 script -qefc "bash '$script' --rollback" /dev/null <&8 >"$fixture/prompt" 2>&1 &
+  rollback_pid=$!
+  for _ in {1..200}; do
+    if grep -q 'Confirmas el rollback' "$fixture/prompt"; then return; fi
+    sleep 0.02
+  done
+  fail 'M-007B S13: rollback no pidió confirmación'
+}
+start_rollback
+flock -n "$DEPLOY_ROOT/.deploy.lock" true || fail 'M-007B S13: rollback tomó el lock antes de confirmar'
+printf 's\n' >&8
+wait "$rollback_pid" && [[ $(current) == "$prior" ]] ||
+  fail 'M-007B S13: no activó la release confirmada'
+start_rollback
+for alternative in "$DEPLOY_ROOT/releases/"*; do
+  if [[ $alternative != "$prior" && $alternative != "$active" ]]; then break; fi
+done
+flock -n "$DEPLOY_ROOT/.deploy.lock" ln -sfnT -- "$alternative" "$DEPLOY_ROOT/shared/previous"
+printf 's\n' >&8
+if wait "$rollback_pid"; then fail 'M-007B S13: aceptó un destino que cambió tras el aviso'; fi
+[[ $(current) == "$prior" && $(readlink "$DEPLOY_ROOT/shared/previous") == "$alternative" ]] &&
+  grep -q 'vuelve a confirmar' "$fixture/prompt" ||
+  fail 'M-007B S13: rollback modificó enlaces con una confirmación obsoleta'
+exec 8>&-
+ln -sfnT -- "$active" "$DEPLOY_ROOT/shared/previous"
+deploy --rollback --yes
+echo 'PASA M-007B S13 rollback'
+
 log_from_error() {
   [[ $1 =~ (shared/logs/deploy-[0-9]{8}-[0-9]{6}\.log) ]] || fail "S14: falta la ruta del log: $1"
   echo "$DEPLOY_ROOT/${BASH_REMATCH[1]}"
