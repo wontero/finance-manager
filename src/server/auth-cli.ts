@@ -108,8 +108,7 @@ async function main([mode, command, id, ...rest]: string[]) {
         await sql`DELETE FROM auth_attempts WHERE created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)`.execute(
           trx,
         );
-        // A successful login event without a client denotes an operator unlock.
-        await authEvent(trx, "login", "success");
+        await authEvent(trx, "unlock", "success");
       });
       console.log("Bloqueo de inicio de sesión eliminado.");
       return;

@@ -1,3 +1,4 @@
+import { BlockList, isIPv6, type Socket } from "node:net";
 import express, { type ErrorRequestHandler, type Express } from "express";
 import { ipKeyGenerator } from "express-rate-limit";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
@@ -17,12 +18,33 @@ import { authContext, clientIp, type AuthDb } from "./auth-store.js";
 
 let passengerDiagnosed = false;
 let passengerWarned = false;
+let passengerUntrustedWarned = false;
+
+const loopback = new BlockList();
+loopback.addSubnet("127.0.0.0", 8);
+loopback.addAddress("::1", "ipv6");
+
+function isLocalPassengerSocket({
+  remoteAddress,
+  remoteFamily,
+  localAddress,
+}: Socket) {
+  if (remoteAddress === undefined)
+    return remoteFamily === undefined && localAddress === undefined;
+  return loopback.check(remoteAddress, isIPv6(remoteAddress) ? "ipv6" : "ipv4");
+}
 
 const authRateLimitIp = {
   keyGenerator: () => {
     const ip = authContext.getStore()?.ip;
     return ip ? ipKeyGenerator(ip) : "global";
   },
+};
+
+const secretRateLimit = {
+  ...authRateLimitIp,
+  // Requests with 256-bit secrets must remain available without a reliable IP.
+  skip: () => !authContext.getStore()?.ip,
 };
 
 export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
@@ -41,24 +63,35 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
   const resourceMetadataPath = new URL(resourceMetadataUrl).pathname;
 
   app.use((request, _response, next) => {
-    const address = passenger
+    const passengerAddress = passenger
       ? request.get("!~Passenger-Client-Address")
-      : request.ip;
-    const ip = clientIp(address);
+      : undefined;
+    const untrustedHeader =
+      passengerAddress !== undefined && !isLocalPassengerSocket(request.socket);
+    const ip = untrustedHeader
+      ? null
+      : clientIp(passenger ? passengerAddress : request.ip);
     if (passenger && !passengerDiagnosed) {
       passengerDiagnosed = true;
       console.info("Diagnóstico de IP de Passenger", {
         socket: request.socket.remoteFamily ?? "local",
         remoteAddress: request.socket.remoteAddress ?? null,
-        passengerHeader: address !== undefined,
+        passengerHeader: passengerAddress !== undefined,
         forwardedForHeader: request.get("X-Forwarded-For") !== undefined,
         ip,
       });
     }
-    if (passenger && !ip && !passengerWarned) {
+    if (untrustedHeader) {
+      if (!passengerUntrustedWarned) {
+        passengerUntrustedWarned = true;
+        console.warn(
+          "Cabecera de Passenger ignorada por una conexión TCP que no es loopback.",
+        );
+      }
+    } else if (passenger && !ip && !passengerWarned) {
       passengerWarned = true;
       console.warn(
-        "Passenger no entregó una IP válida. El login usa solo el límite global.",
+        "Passenger no entregó una IP válida. El login usa los límites globales.",
       );
     }
     const agent = request.get("User-Agent");
@@ -80,14 +113,7 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
       authorizationHeaders(response, config);
       next();
     },
-    authorizationForms(
-      config,
-      {
-        ...authRateLimitIp,
-        skip: () => !authContext.getStore()?.ip,
-      },
-      db,
-    ),
+    authorizationForms(config, authRateLimitIp, db),
   );
 
   app.post(
@@ -133,8 +159,8 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
     mcpAuthRouter({
       ...options,
       authorizationOptions: { rateLimit: authRateLimitIp },
-      tokenOptions: { rateLimit: authRateLimitIp },
-      revocationOptions: { rateLimit: authRateLimitIp },
+      tokenOptions: { rateLimit: secretRateLimit },
+      revocationOptions: { rateLimit: secretRateLimit },
       clientRegistrationOptions: {
         clientIdGeneration: false,
         rateLimit: authRateLimitIp,

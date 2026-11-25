@@ -195,7 +195,7 @@ async function getForm(
 
 export function authorizationForms(
   config: AuthConfig,
-  ipOptions: Pick<RateLimitOptions, "skip" | "keyGenerator">,
+  ipOptions: Pick<RateLimitOptions, "keyGenerator">,
   database: AuthDb | undefined,
 ) {
   const router = express.Router();
@@ -205,7 +205,7 @@ export function authorizationForms(
       rateLimit({
         ...ipOptions,
         windowMs: 15 * 60_000,
-        limit: 20,
+        limit: () => (authContext.getStore()?.ip ? 20 : 60),
         standardHeaders: "draft-6",
         legacyHeaders: false,
         handler: (_request, response) => {

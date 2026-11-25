@@ -61,7 +61,7 @@ export async function up(db: Kysely<unknown>) {
     ) ${options}`,
     sql`CREATE TABLE IF NOT EXISTS auth_events (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      event_type ENUM('login', 'issue', 'refresh', 'revoke', 'setup') NOT NULL,
+      event_type ENUM('login', 'issue', 'refresh', 'revoke', 'setup', 'unlock') NOT NULL,
       outcome ENUM('success', 'invalid', 'blocked', 'replay', 'error') NOT NULL,
       ip ${ip},
       user_agent VARCHAR(200),

@@ -53,7 +53,7 @@ export function authTransaction<T>(
 
 export function authEvent(
   db: AuthDb,
-  type: "login" | "issue" | "refresh" | "revoke" | "setup",
+  type: "login" | "issue" | "refresh" | "revoke" | "setup" | "unlock",
   outcome: "success" | "invalid" | "blocked" | "replay" | "error",
   clientId: string | null = null,
 ) {

@@ -59,7 +59,9 @@ Ejecuta estos pasos desde cPanel y la terminal del VPS como el usuario `ingete7`
 
    Conserva esta clave junto con los secretos respaldados de la instancia. Si la pierdes, genera una nueva y ejecuta `auth:setup` para dar de alta otro TOTP y revocar los tokens anteriores.
 
-   `TRUST_PROXY=passenger` usa la IP validada de `!~Passenger-Client-Address` e ignora `X-Forwarded-For` para los limitadores. Usa este modo solo cuando Apache/Passenger sea el único punto de entrada al proceso Node. En la primera petición de cada proceso, el log muestra el tipo de socket, su dirección remota, la presencia de ambas cabeceras y la IP elegida. En P3, confirma que la IP coincide con la del cliente. Si Passenger no entrega una IP válida, el login usa solo el límite global y el proceso deja un aviso. [Cabeceras seguras de Passenger](https://www.phusionpassenger.com/library/indepth/nodejs/secure_http_headers.html)
+   `TRUST_PROXY=passenger` usa la IP validada de `!~Passenger-Client-Address` en conexiones por socket Unix o loopback. Ignora `X-Forwarded-For` para los limitadores. Usa este modo cuando Apache/Passenger sea el único punto de entrada al proceso Node. En la primera petición de cada proceso, el log muestra el tipo de socket, su dirección remota, la presencia de ambas cabeceras y la IP elegida. En P3, confirma que la IP coincide con la del cliente. El proceso avisa una vez si recibe la cabecera por TCP fuera de loopback y una vez si Passenger omite la IP o envía una inválida. [Cabeceras seguras de Passenger](https://www.phusionpassenger.com/library/indepth/nodejs/secure_http_headers.html)
+
+   Sin IP fiable, `/register` y `/authorize` usan sus contadores HTTP globales por proceso. Cada formulario POST admite 60 solicitudes sin IP por proceso en 15 minutos. Con IP fiable, admite 20 por IP en esa ventana. `/token` y `/revoke` aplican su límite HTTP cuando hay IP fiable.
 
    `TRUST_PROXY=loopback` sigue disponible para un proxy local de confianza que añade al final de `X-Forwarded-For` la IP del cliente. Para Node expuesto directamente, usa `TRUST_PROXY=off`.
 
@@ -183,7 +185,7 @@ npm run auth:tokens -- revoke 123
 npm run auth:tokens -- revoke-all
 ```
 
-Veinte fallos en una hora pueden bloquear temporalmente nuevos inicios de sesión desde cualquier IP. Quien provoque esos fallos puede impedir el login. Los tokens vigentes siguen funcionando. Ejecuta `npm run auth:unlock` en `current` para borrar los intentos vigentes. El comando deja un evento `login/success` sin cliente asociado. Los límites HTTP por IP de cada proceso conservan su ventana.
+Veinte fallos en una hora pueden bloquear temporalmente nuevos inicios de sesión desde cualquier IP. Quien provoque esos fallos puede impedir el login. Los tokens vigentes siguen funcionando. Ejecuta `npm run auth:unlock` en `current` para borrar los intentos vigentes. El comando deja un evento `unlock/success` sin cliente asociado. Los límites HTTP de cada proceso conservan su ventana.
 
 ## 7. Despliega cambios y usa rollback
 

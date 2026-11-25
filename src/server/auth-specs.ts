@@ -28,6 +28,7 @@ const tables = [
 const random = () => randomBytes(32).toString("base64url");
 const hash = (value: string) => createHash("sha256").update(value).digest();
 const forwardedIp = "192.0.2.10";
+const passengerHeader = "!~Passenger-Client-Address";
 
 function fields(response: Response) {
   const csrf = /name="csrf" value="([^"]+)"/.exec(response.text)?.[1];
@@ -77,9 +78,10 @@ export function authSpecs(
       encryptionKey = key,
       production = false,
       trustProxy = "loopback",
-      withoutSocketIp = false,
+      localSocket = false,
+      makeApp = createApp,
     ) => {
-      const app = createApp(
+      const app = makeApp(
         readConfig({
           PUBLIC_URL: publicUrl,
           APP_VERSION: version,
@@ -90,11 +92,13 @@ export function authSpecs(
         undefined,
         database,
       );
-      if (!withoutSocketIp) return request(app);
+      if (!localSocket) return request(app);
       return request(
         express().use((req, _res, next) => {
-          Object.defineProperty(req.socket, "remoteAddress", {
-            value: undefined,
+          Object.defineProperties(req.socket, {
+            remoteAddress: { value: undefined },
+            remoteFamily: { value: undefined },
+            localAddress: { value: undefined },
           });
           next();
         }, app),
@@ -178,8 +182,8 @@ export function authSpecs(
         access_token: string;
         refresh_token: string;
       };
-    const refresh = (token: string) =>
-      client.post("/token").type("form").send({
+    const refresh = (token: string, browser = client) =>
+      browser.post("/token").type("form").send({
         grant_type: "refresh_token",
         client_id: clientId,
         refresh_token: token,
@@ -437,12 +441,14 @@ export function authSpecs(
   run(
     "S14: Passenger supplies the limiter IP and missing IPs only count globally",
     async ({ begin, login, http, key, sql, event, password }) => {
+      vi.resetModules();
+      const { createApp: freshApp } = await import("./app.js");
       const info = vi.spyOn(console, "info").mockImplementation(() => {});
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
-        const passenger = http(key, false, "passenger");
+        const passenger = http(key, false, "passenger", false, freshApp);
         const address = "203.0.113.14";
-        const header = "!~Passenger-Client-Address";
+        const header = passengerHeader;
         const form = fields(
           await begin("S256", passenger)
             .set(header, address)
@@ -469,7 +475,7 @@ export function authSpecs(
           if (i === 21) expect(response.headers["retry-after"]).toBeDefined();
         }
 
-        const socket = http(key, false, "passenger", true);
+        const socket = http(key, false, "passenger", true, freshApp);
         const socketForm = fields(await begin("S256", socket).expect(200));
         await login(socketForm, { password: random() }, socket)
           .set(header, "invalid-address")
@@ -511,7 +517,9 @@ export function authSpecs(
         ]) {
           expect(diagnostic.includes(detail)).toBe(true);
         }
-        expect(warn.mock.calls.length).toBe(1);
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          expect.stringMatching(/Passenger no entregó una IP válida/),
+        );
       } finally {
         info.mockRestore();
         warn.mockRestore();
@@ -555,7 +563,7 @@ export function authSpecs(
   );
 
   run(
-    "S16: auth:unlock clears a global login block and records the operation",
+    "S16/S23: auth:unlock clears the global block and records only an unlock event",
     async ({ begin, login, sql, issue, ping }) => {
       const { access_token: access } = await issue();
       await sql.query("UPDATE auth_users SET last_totp_step = NULL");
@@ -565,6 +573,9 @@ export function authSpecs(
       const form = fields(await begin().expect(200));
       await login(form).expect(429);
       await ping(access).expect(200);
+      const [[before]] = await sql.query<RowDataPacket[]>(
+        "SELECT MAX(id) AS id FROM auth_events",
+      );
       const url = new URL(setting("DATABASE_URL"));
       url.pathname = "/finance_test";
       await promisify(execFile)(
@@ -578,13 +589,90 @@ export function authSpecs(
           },
         },
       );
-      const [[audit]] = await sql.query<
-        RowDataPacket[]
-      >(`SELECT COUNT(*) AS total FROM auth_events
-        WHERE event_type = 'login' AND outcome = 'success' AND client_id IS NULL AND ip IS NULL`);
-      expect(Number(audit.total)).toBe(1);
+      const [audit] = await sql.execute<RowDataPacket[]>(
+        "SELECT event_type, outcome, client_id, ip FROM auth_events WHERE id > ?",
+        [before.id],
+      );
+      expect(audit).toEqual([
+        { event_type: "unlock", outcome: "success", client_id: null, ip: null },
+      ]);
       await login(form).expect(200);
       await ping(access).expect(200);
+    },
+  );
+
+  run(
+    "S20: token and revocation requests without IP leave valid requests available",
+    async ({ http, issue, refresh, ping, clientId }) => {
+      const { refresh_token: token } = await issue();
+      const missing = http(undefined, false, "off", true);
+      for (let i = 0; i < 60; i++)
+        await missing.post("/token").type("form").expect(400);
+      const renewed = await refresh(token, missing).expect(200);
+      for (let i = 0; i < 60; i++)
+        await missing.post("/revoke").type("form").expect(400);
+      await missing
+        .post("/revoke")
+        .type("form")
+        .send({ client_id: clientId, token: renewed.body.refresh_token })
+        .expect(200);
+      await ping(renewed.body.access_token).expect(401);
+    },
+  );
+
+  run(
+    "S20: Passenger IPs have separate token quotas",
+    async ({ http, issue, refresh }) => {
+      const { refresh_token: token } = await issue();
+      const client = http(undefined, false, "passenger");
+      const firstIp = "203.0.113.20";
+      for (let i = 0; i < 50; i++)
+        await client
+          .post("/token")
+          .type("form")
+          .set(passengerHeader, firstIp)
+          .expect(400);
+      await client
+        .post("/token")
+        .type("form")
+        .set(passengerHeader, firstIp)
+        .expect(429);
+      await refresh(token, client)
+        .set(passengerHeader, "203.0.113.21")
+        .expect(200);
+    },
+  );
+
+  run(
+    "S22: both forms apply the no-IP limit before waiting for the user row lock",
+    async ({ begin, http, login, sql }) => {
+      const approval = fields(
+        await login(fields(await begin().expect(200))).expect(200),
+      );
+      const form = fields(await begin().expect(200));
+      const missing = http(undefined, false, "off", true);
+      await sql.beginTransaction();
+      try {
+        await sql.query("SELECT id FROM auth_users WHERE id = 1 FOR UPDATE");
+        for (const path of ["/authorize/login", "/authorize/consent"]) {
+          for (let i = 0; i < 60; i++)
+            await missing.post(path).type("form").expect(403);
+        }
+        await login(form, {}, missing)
+          .timeout(2000)
+          .expect(429)
+          .expect("Retry-After", /\d+/);
+        await missing
+          .post("/authorize/consent")
+          .set("Cookie", approval.cookie)
+          .type("form")
+          .send({ csrf: approval.csrf, decision: "allow" })
+          .timeout(2000)
+          .expect(429)
+          .expect("Retry-After", /\d+/);
+      } finally {
+        await sql.rollback();
+      }
     },
   );
 
