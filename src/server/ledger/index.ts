@@ -18,6 +18,7 @@ import {
   naturalAmount,
 } from "./queries.js";
 import type { Actor, LedgerDatabase } from "./schema.js";
+import * as reports from "./reports.js";
 import * as entries from "./transactions.js";
 
 export function createLedger(database: Kysely<unknown>, actor: Actor) {
@@ -225,12 +226,30 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       );
       return read((trx) => getCategoryTotals(trx, id, from, to));
     },
-    async listOperations(input: LedgerInput<"listOperations"> = {}) {
+    async listOperations(
+      input: LedgerInput<"listOperations"> = {},
+      page?: {
+        limit: number;
+        before?: string;
+      },
+    ) {
       const { limit = 20 } = parseLedgerInput(
         ledgerInputs.listOperations,
         input,
       );
-      return getOperations(db, limit);
+      return read((trx) =>
+        getOperations(trx, page?.limit ?? limit, page?.before),
+      );
     },
+    getAccountTree: (includeArchived: boolean) =>
+      reports.getAccountTree(db, includeArchived),
+    listAccountBalances: (ids: string[], date: string) =>
+      read((trx) => reports.getAccountBalances(trx, ids, date)),
+    getPeriodSummary: (input: Parameters<typeof reports.getPeriodSummary>[1]) =>
+      read((trx) => reports.getPeriodSummary(trx, input)),
+    findTransactions: (input: Parameters<typeof reports.findTransactions>[1]) =>
+      read((trx) => reports.findTransactions(trx, input)),
+    listMetadata: (input: Parameters<typeof reports.listMetadata>[1]) =>
+      reports.listMetadata(db, input),
   };
 }

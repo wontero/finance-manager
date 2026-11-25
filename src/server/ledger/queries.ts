@@ -7,7 +7,7 @@ export function naturalAmount(kind: AccountKind, amount: bigint) {
   return kind === "asset" || kind === "expense" ? amount : -amount;
 }
 
-function currentPostings(db: Kysely<LedgerDatabase>) {
+export function currentPostings(db: Kysely<LedgerDatabase>) {
   return db
     .selectFrom("postings as p")
     .innerJoin("transactions as t", "t.id", "p.transaction_id")
@@ -140,16 +140,32 @@ export async function getCategoryTotals(
   }));
 }
 
-export async function getOperations(db: Kysely<LedgerDatabase>, limit: number) {
-  const entries = await db
+export async function getOperations(
+  db: Kysely<LedgerDatabase>,
+  limit: number,
+  before?: string,
+) {
+  let query = db
     .selectFrom("operations")
     .selectAll()
     .orderBy("seq", "desc")
-    .limit(limit)
-    .execute();
+    .limit(limit);
+  if (before) query = query.where("seq", "<", before);
+  const entries = await query.execute();
+  const oldest = entries.at(-1);
+  if (!oldest) return [];
+  const reversals = before
+    ? await db
+        .selectFrom("operations")
+        .select(["id", "undoes_operation_id"])
+        .where("seq", ">", oldest.seq)
+        .where("undoes_operation_id", "is not", null)
+        .orderBy("seq", "desc")
+        .execute()
+    : entries;
   const undone = new Map<string, boolean>();
   // Un deshacer directo es único. La paridad de la cadena muestra si está aplicado.
-  for (const entry of entries) {
+  for (const entry of reversals) {
     if (entry.undoes_operation_id !== null)
       undone.set(entry.undoes_operation_id, !undone.get(entry.id));
   }
