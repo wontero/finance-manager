@@ -30,11 +30,11 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
 
 1. Abre **Databases → Database Wizard** y **Manage My Databases**. Crea dos bases vacías (por ejemplo, `<usuario-cpanel>_finanzas` y `<usuario-cpanel>_finanzas_ro`) y tres usuarios con contraseñas distintas. Anota los nombres completos que muestra cPanel, incluido el prefijo. Al añadir cada usuario a una base, marca las casillas indicadas. [Database Wizard](https://docs.cpanel.net/cpanel/databases/database-wizard/)
 
-   | Usuario de ejemplo | Base principal                                 | Base de solo lectura |
-   | ------------------ | ---------------------------------------------- | -------------------- |
-   | `<usuario-cpanel>_finapp`   | **SELECT**, **INSERT**, **UPDATE**, **DELETE** | Sin asignación       |
-   | `<usuario-cpanel>_finmig`   | **ALL PRIVILEGES**                             | **ALL PRIVILEGES**   |
-   | `<usuario-cpanel>_finro`    | Sin asignación                                 | **SELECT**           |
+   | Usuario de ejemplo        | Base principal                                 | Base de solo lectura |
+   | ------------------------- | ---------------------------------------------- | -------------------- |
+   | `<usuario-cpanel>_finapp` | **SELECT**, **INSERT**, **UPDATE**, **DELETE** | Sin asignación       |
+   | `<usuario-cpanel>_finmig` | **ALL PRIVILEGES**                             | **ALL PRIVILEGES**   |
+   | `<usuario-cpanel>_finro`  | Sin asignación                                 | **SELECT**           |
 
    La cuenta de migración crea las vistas como su propia cuenta definidora. Conserva esa cuenta mientras existan las vistas. Mantén la base de consulta dedicada a las vistas que crea el proyecto. [Permisos de las vistas en MariaDB](https://mariadb.com/docs/server/server-usage/views/create-view)
 
