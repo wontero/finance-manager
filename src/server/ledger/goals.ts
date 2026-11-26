@@ -225,8 +225,12 @@ export async function listGoals(
       const target = BigInt(goal.target_amount);
       if (goal.type === "savings") {
         const ids = await accountIds(db, goal.id);
+        const balances = await getAccountBalances(db, ids, today);
         const balance = await value(
-          await getAccountBalances(db, ids, today),
+          balances.map(({ kind, currency, amount }) => ({
+            currency,
+            amount: kind === "liability" ? -amount : amount,
+          })),
           goal.currency,
           today,
         );
@@ -247,6 +251,7 @@ export async function listGoals(
           type: "savings" as const,
           accountIds: ids,
           days,
+          expired: goal.end_date !== null && goal.end_date < today,
           monthly,
         };
       }

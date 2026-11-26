@@ -262,7 +262,7 @@ export function accountSpecs(schema: string, readonlySchema: string) {
       expect((await tool("ver_metas", { id: created.id })).isError).toBe(true);
     });
 
-    test("M-025 S2: suma saldos, convierte a la fecha y calcula el ahorro por mes", async () => {
+    test("M-025 S2 / M-025B S1: calcula el ahorro neto, convierte y mide el avance al pagar la deuda", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       try {
         vi.setSystemTime(new Date("2026-08-01T04:00:00Z"));
@@ -308,18 +308,44 @@ export function accountSpecs(schema: string, readonlySchema: string) {
         });
         const result = await tool("ver_metas", { id });
         expect(result.structuredContent.metas[0]).toMatchObject({
-          saldo: { monto: "175.00", moneda: "BOB" },
-          falta: { monto: "125.00" },
-          porcentaje: "58.33",
+          saldo: { monto: "165.00", moneda: "BOB" },
+          falta: { monto: "135.00" },
+          porcentaje: "55.00",
           dias_restantes: 60,
-          ahorro_mensual: { monto: "62.50" },
+          ahorro_mensual: { monto: "67.50" },
         });
-        expect(result.content[0].text).toContain("62,50 BOB");
+        expect(result.content[0].text).toContain("67,50 BOB");
+        await goalWrite("modificar_meta", {
+          id,
+          cuentas: [bolivianos, pasivo],
+          monto: "200",
+        });
+        const savings = async () =>
+          (await tool("ver_metas", { id })).structuredContent.metas[0];
+        expect(await savings()).toMatchObject({
+          saldo: { monto: "95.00", moneda: "BOB" },
+          falta: { monto: "105.00" },
+          porcentaje: "47.50",
+          ahorro_mensual: { monto: "52.50" },
+        });
+        await a.ledger.transfer({
+          fromAccountId: a.cash,
+          toAccountId: pasivo,
+          amount: "5",
+          date: "2026-08-01",
+          description: "Pago de tarjeta",
+        });
+        expect(await savings()).toMatchObject({
+          saldo: { monto: "100.00", moneda: "BOB" },
+          falta: { monto: "100.00" },
+          porcentaje: "50.00",
+          ahorro_mensual: { monto: "50.00" },
+        });
         await goalWrite("modificar_meta", { id, limite: null });
-        const open = (await tool("ver_metas", { id })).structuredContent
-          .metas[0];
+        const open = await savings();
         expect(open).not.toHaveProperty("ahorro_mensual");
         expect(open).not.toHaveProperty("dias_restantes");
+        expect(open).not.toHaveProperty("vencida");
         await goalWrite("archivar_meta", { id });
         const usdGoal = await goalWrite("crear_meta", {
           tipo: "ahorro",
@@ -352,6 +378,36 @@ export function accountSpecs(schema: string, readonlySchema: string) {
           falta: { monto: "11.00" },
         });
         await goalWrite("archivar_meta", { id: usdGoal.id });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("M-025B S2: ver_metas indica el vencimiento al pasar la fecha límite en La Paz", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-08-02T03:59:59Z"));
+        const { id } = await goalWrite("crear_meta", {
+          tipo: "ahorro",
+          nombre: "Meta con plazo",
+          monto: "1",
+          moneda: "BOB",
+          cuentas: [a.cash],
+          limite: "2026-08-01",
+        });
+        const due = await tool("ver_metas", { id });
+        expect(due.structuredContent.metas[0]).toMatchObject({
+          dias_restantes: 0,
+          vencida: false,
+        });
+        vi.setSystemTime(new Date("2026-08-02T04:00:00Z"));
+        const expired = await tool("ver_metas", { id });
+        expect(expired.structuredContent.metas[0]).toMatchObject({
+          dias_restantes: 0,
+          vencida: true,
+        });
+        expect(expired.content[0].text).toContain("vencida");
+        await goalWrite("archivar_meta", { id });
       } finally {
         vi.useRealTimers();
       }
@@ -570,11 +626,16 @@ export function accountSpecs(schema: string, readonlySchema: string) {
       );
     });
 
-    test("M-025: reauth exige Origin aun con una sesión válida", async () => {
+    test("M-025B S3: reauth rechaza la falta de Origin con la misma sesión que acepta con Origin válido", async () => {
       await browser
         .post("/auth/google/reauth")
         .set("Cookie", cookieA)
         .expect(403);
+      await browser
+        .post("/auth/google/reauth")
+        .set("Cookie", cookieA)
+        .set("Origin", site)
+        .expect(303);
     });
 
     test("S1: exporta todos los datos financieros propios con montos decimales exactos", async () => {

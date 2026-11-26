@@ -25,6 +25,7 @@ const goalOutput = z.object({
   saldo: money.nullable().optional(),
   falta: money.nullable().optional(),
   dias_restantes: z.number().int().optional(),
+  vencida: z.boolean().optional(),
   ahorro_mensual: money.nullable().optional(),
   categoria: rowId.optional(),
   periodo: z.enum(["mensual", "rango"]).optional(),
@@ -53,7 +54,7 @@ export function registerGoalTools(server: ToolServer, ledger: Ledger) {
   registerTool(
     server,
     "crear_meta",
-    "Crea una meta de ahorro por saldo de cuentas o un tope de gastos por categoría. Indica los IDs. El tope mensual no lleva fechas y el tope por rango requiere ambas.",
+    "Crea una meta de ahorro por saldo neto de cuentas (activos menos pasivos) o un tope de gastos por categoría. Indica los IDs. El tope mensual no lleva fechas y el tope por rango requiere ambas.",
     z.strictObject({
       ...fields,
       tipo: goalOutput.shape.tipo,
@@ -149,7 +150,7 @@ export function registerGoalTools(server: ToolServer, ledger: Ledger) {
   registerTool(
     server,
     "ver_metas",
-    "Muestra el avance de todas las metas activas o de una meta por ID.",
+    "Muestra el avance de todas las metas activas o de una meta por ID. El avance de ahorro es el saldo neto de las cuentas elegidas (activos menos pasivos).",
     ledgerInputs.listGoals,
     z.object({ metas: z.array(goalOutput) }),
     "read",
@@ -182,8 +183,11 @@ export function registerGoalTools(server: ToolServer, ledger: Ledger) {
         };
         if (result.type === "savings") {
           const monthly = show(result.monthly);
-          const deadline =
-            result.days === undefined ? "" : `, ${result.days} días restantes`;
+          const deadline = result.expired
+            ? ", vencida"
+            : result.days === undefined
+              ? ""
+              : `, ${result.days} días restantes`;
           lines.push(
             heading +
               ": " +
@@ -205,7 +209,11 @@ export function registerGoalTools(server: ToolServer, ledger: Ledger) {
             falta: rest,
             ...(result.days === undefined
               ? {}
-              : { dias_restantes: result.days, ahorro_mensual: monthly }),
+              : {
+                  dias_restantes: result.days,
+                  vencida: result.expired,
+                  ahorro_mensual: monthly,
+                }),
           };
         }
         lines.push(
