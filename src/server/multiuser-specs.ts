@@ -4,6 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import express from "express";
 import { sql, type Kysely } from "kysely";
 import type { RowDataPacket } from "mysql2";
+import { createConnection } from "mysql2/promise";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { digest, type AuthDb } from "./auth-store.js";
@@ -13,6 +14,7 @@ import { createDatabase } from "./database.js";
 import { createLedger, provisionUser } from "./ledger/index.js";
 import { ledgerLimits } from "./ledger/limits.js";
 import { createMcp } from "./mcp/index.js";
+import { readonlyStatementPrefix } from "./mcp/readonly-sql.js";
 import { localDatabase } from "./scripts/local-database.js";
 
 const date = "1997-11-11";
@@ -293,6 +295,114 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
           ),
         ).toEqual([{ description: "privado_b" }]);
       }, 10_000);
+
+      test("M-023C S2: EXPLAIN conserva la condición externa fuera de la vista", async () => {
+        const connection = await createConnection({
+          ...localDatabase("MIGRATION_DATABASE_URL"),
+          database: readonlySchema,
+        });
+        const lock = randomUUID();
+        try {
+          await connection.execute("SELECT GET_LOCK(?, 0)", [lock]);
+          await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
+            VALUES (${connection.threadId}, ${aId}, ${lock}, UTC_TIMESTAMP(3) + INTERVAL 10 SECOND)`.execute(
+            db,
+          );
+          const [[plan]] = await connection.query<RowDataPacket[]>(
+            readonlyStatementPrefix +
+              "EXPLAIN FORMAT=JSON SELECT name FROM v_accounts WHERE name LIKE 'privado%'",
+          );
+          const outer = JSON.parse(plan.EXPLAIN).query_block.table;
+          expect(outer.attached_condition).toContain("privado%");
+          expect(outer.materialized).toBeDefined();
+          expect(JSON.stringify(outer.materialized)).toContain("user_id");
+          expect(JSON.stringify(outer.materialized)).not.toContain("privado%");
+        } finally {
+          await connection.end();
+          await sql`DELETE FROM readonly_sql_sessions WHERE lock_name = ${lock}`.execute(
+            db,
+          );
+        }
+      });
+
+      test("M-023C S3: un mapeo vigente sin bloqueo no autoriza y la siguiente consulta limpia los mapeos obsoletos", async () => {
+        const [orphan, expired] = await Promise.all([
+          createConnection({
+            ...localDatabase("READONLY_DATABASE_URL"),
+            database: readonlySchema,
+          }),
+          reader.pool.promise().getConnection(),
+        ]);
+        const orphanLock = randomUUID();
+        const expiredLock = randomUUID();
+        try {
+          await orphan.execute("SELECT GET_LOCK(?, 0)", [orphanLock]);
+          await expired.execute("SELECT GET_LOCK(?, 0)", [expiredLock]);
+          await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
+            VALUES
+              (${orphan.threadId}, ${aId}, ${orphanLock}, UTC_TIMESTAMP(3) + INTERVAL 30 SECOND),
+              (${expired.threadId}, ${aId}, ${expiredLock}, UTC_TIMESTAMP(3) - INTERVAL 1 SECOND)`.execute(
+            db,
+          );
+          const statement = "SELECT name FROM v_accounts WHERE id = " + a.cash;
+          expect((await orphan.query(statement))[0]).toEqual([
+            { name: "privado_a" },
+          ]);
+          await orphan.execute("SELECT RELEASE_LOCK(?)", [orphanLock]);
+          expect((await orphan.query(statement))[0]).toEqual([]);
+          expect(
+            await rows(1, "SELECT name FROM v_accounts WHERE id = " + b.cash),
+          ).toEqual([{ name: "privado_b" }]);
+          expect(
+            (await sql`SELECT lock_name FROM readonly_sql_sessions`.execute(db))
+              .rows,
+          ).toEqual([]);
+        } finally {
+          await orphan.end();
+          expired.destroy();
+          await sql`DELETE FROM readonly_sql_sessions WHERE lock_name IN (${orphanLock}, ${expiredLock})`.execute(
+            db,
+          );
+        }
+      });
+
+      test("M-023C S3: un error de ejecución borra el mapeo y B sigue aislado", async () => {
+        const pending = call(
+          0,
+          "SELECT IF(SLEEP(0.5) = 0, EXP(1000 + id), 0) FROM v_transactions WHERE id = " +
+            a.entry.id,
+        );
+        const active = async () =>
+          (await sql`SELECT user_id FROM readonly_sql_sessions`.execute(db))
+            .rows;
+        await expect.poll(active).toEqual([{ user_id: aId }]);
+        const result = await pending;
+        expect(result).toMatchObject({
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "No se pudo ejecutar la consulta de solo lectura.",
+            },
+          ],
+        });
+        expect(result.structuredContent).toBeUndefined();
+        expect(await active()).toEqual([]);
+        expect(
+          await rows(1, "SELECT name FROM v_accounts WHERE id = " + b.cash),
+        ).toEqual([{ name: "privado_b" }]);
+      });
+
+      test("M-023C S4: conserva los literales y los identificadores entre comillas", async () => {
+        expect(
+          await rows(
+            0,
+            "SELECT\t/* comentario */ 'café -- # /* */' AS `etiquéta` FROM v_accounts WHERE id = " +
+              a.cash +
+              ";\n",
+          ),
+        ).toEqual([{ etiquéta: "café -- # /* */" }]);
+      });
     });
 
     async function newUser() {

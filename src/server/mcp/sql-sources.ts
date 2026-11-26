@@ -120,7 +120,7 @@ export function validateSources(statement: string, schemas: readonly string[]) {
     "load_file",
   ]);
   const words =
-    /'(?:\\[\s\S]|''|[^'\\])*'|"(?:\\[\s\S]|""|[^"\\])*"|\x60(?:\x60\x60|[^\x60])*\x60|[a-z_0-9$]+|[^ \r\n\t\f\v]/gi;
+    /'(?:\\[\s\S]|''|[^'\\])*'|"(?:\\[\s\S]|""|[^"\\])*"|\x60(?:\x60\x60|[^\x60])*\x60|[a-z_0-9$]+|[^ \t-\r]/gi;
   const tokens: Token[] = [];
   const stack = [tokens];
   for (const [token] of statement.matchAll(words)) {

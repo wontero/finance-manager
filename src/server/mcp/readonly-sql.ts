@@ -10,6 +10,9 @@ import { registerTool, type ToolServer } from "./tool.js";
 const rowLimit = 500;
 // Se reserva espacio para el resumen y la envoltura JSON-RPC.
 const byteLimit = 64 * 1024 - 1024;
+// Las vistas TEMPTABLE deben materializar el ámbito del usuario antes del WHERE externo.
+export const readonlyStatementPrefix =
+  "SET STATEMENT max_statement_time=5, optimizer_switch='condition_pushdown_for_derived=off,split_materialized=off' FOR ";
 const output = z.object({
   filas: z.array(z.record(z.string(), z.json())),
   recortado: z.boolean(),
@@ -18,7 +21,7 @@ const output = z.object({
 
 function singleSelect(input: string) {
   const tokens =
-    /\/\*[\s\S]*?\*\/|(?:--(?=\s|$)|#)[^\r\n]*|'(?:\\[\s\S]|''|[^'\\])*'|"(?:\\[\s\S]|""|[^"\\])*"|\x60(?:\x60\x60|[^\x60])*\x60|;/g;
+    /(?<comment>\/\*[\s\S]*?\*\/)|'(?:\\[\s\S]|''|[^'\\])*'|"(?:\\[\s\S]|""|[^"\\])*"|\x60(?:\x60\x60|[^\x60])*\x60|;|(?<invalid>--|#|\/\*|[^ -~\t-\r])/g;
   let end = 0;
   let statement = "";
   let terminated = false;
@@ -26,9 +29,13 @@ function singleSelect(input: string) {
     const preceding = input.slice(end, match.index);
     const token = match[0];
     end = match.index + token.length;
-    const comment = /^(?:\/\*|--|#)/.test(token);
+    const { comment, invalid } = match.groups!;
     if (/^\/\*(?:!|M!|\+)/i.test(token))
       throw new Error("La consulta no admite comentarios ejecutables.");
+    if (invalid || (comment && /[^ -~\t-\r]/.test(comment)))
+      throw new Error(
+        "La consulta de solo lectura contiene caracteres o comentarios no permitidos.",
+      );
     if (terminated && (preceding.trim() || !comment))
       throw new Error("Envía una sola sentencia de solo lectura.");
     statement += preceding;
@@ -78,6 +85,7 @@ async function select(
   const lockName = "finance-sql:" + randomUUID();
   let mappingAttempted = false;
   try {
+    await clearReadonlySessions(db);
     const [[{ acquired }]] = await conn
       .promise()
       .execute<RowDataPacket[]>(
@@ -98,7 +106,7 @@ async function select(
     if (!numAffectedRows) throw new Error("No se pudo asignar la sesión.");
     await conn.promise().query("START TRANSACTION READ ONLY");
     const query = conn.query({
-      sql: "SET STATEMENT max_statement_time=5 FOR " + statement,
+      sql: readonlyStatementPrefix + statement,
       rowsAsArray: true,
       timeout: 7500,
     });
@@ -162,7 +170,6 @@ export function registerSql(
     z.object({
       sql: z
         .string()
-        .trim()
         .min(1)
         .max(64 * 1024),
     }),
