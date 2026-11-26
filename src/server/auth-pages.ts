@@ -27,6 +27,13 @@ button{font:inherit;font-weight:650;padding:.65rem .95rem;margin:.9rem .25rem .2
 button[value=deny]{background:white;color:#22503e}
 :focus-visible{outline:3px solid #296cb1;outline-offset:2px}
 [role=alert]{color:#912323}
+main:has(.metrics){width:min(100%,60rem)}
+.metrics{overflow:auto}
+dl{display:grid;grid-template-columns:1fr auto;gap:.5rem 1rem}
+dd{margin:0;font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:.45rem .65rem;border-bottom:1px solid #ccd7d0;text-align:right;white-space:nowrap}
+th:first-child{text-align:left}
 `;
 const styleHash = createHash("sha256").update(stylesheet).digest("base64");
 const clientDate = new Intl.DateTimeFormat("es-BO", {
@@ -51,7 +58,7 @@ type AuthRequest = {
   client_created_at: string;
 };
 
-function escapeHtml(value: string) {
+export function escapeHtml(value: string) {
   const replacements: Record<string, string> = {
     "&": "&amp;",
     "<": "&lt;",
@@ -86,7 +93,12 @@ function cookieOptions(config: AuthConfig) {
   };
 }
 
-function page(response: Response, title: string, body: string, status = 200) {
+export function page(
+  response: Response,
+  title: string,
+  body: string,
+  status = 200,
+) {
   return response.status(status).type("html").send(`<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Finance Manager</title><style>${stylesheet}</style></head>
@@ -109,7 +121,7 @@ export function renderLogin(
     `<form action="/authorize/google" method="post">
       <input type="hidden" name="csrf" value="${csrf}">
       <button>Iniciar sesión con Google</button>
-    </form>`,
+    </form><p><a href="/privacidad">Privacidad y términos</a></p>`,
   );
 }
 
@@ -205,6 +217,21 @@ export function googleForms(config: AuthConfig, database: AuthDb | undefined) {
       await google.start(response);
     },
   );
+  router.post(
+    "/reauth",
+    loginRateLimit(rateLimited),
+    async (request, response) => {
+      if (
+        !google ||
+        !database ||
+        request.get("Origin") !== config.issuer.origin
+      )
+        return invalidForm(response);
+      const active = await session.find(database, request);
+      if (!active) return invalidForm(response);
+      await google.start(response, { sessionHash: active.hash });
+    },
+  );
   router.get(
     "/callback",
     loginRateLimit(rateLimited),
@@ -215,7 +242,29 @@ export function googleForms(config: AuthConfig, database: AuthDb | undefined) {
         await authEvent(database, "login", "invalid");
         return invalidForm(response);
       }
-      const { oauthBrowser, identity } = result;
+      const { oauthBrowser, identity, sessionHash } = result;
+      if (sessionHash) {
+        const token = await authTransaction(database, async (db) => {
+          const {
+            rows: [active],
+          } = await sql<{ id: string; google_sub: string }>`
+            SELECT u.id, u.google_sub FROM web_sessions s JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ${sessionHash} AND s.revoked_at IS NULL AND s.expires_at > UTC_TIMESTAMP(3)
+            FOR UPDATE
+          `.execute(db);
+          if (active?.google_sub !== identity.sub) return;
+          await resolveGoogleUser(db, config.google!, identity);
+          await authEvent(db, "login", "success", null, active.id);
+          await sql`DELETE FROM web_sessions WHERE token_hash = ${sessionHash}`.execute(
+            db,
+          );
+          return session.create(db, active.id, identity.email);
+        });
+        if (!token) return invalidForm(response);
+        session.attach(response, token);
+        response.redirect(303, "/cuenta?reauth=1");
+        return;
+      }
       const login = await authTransaction(database, async (db) => {
         const item =
           oauthBrowser && (await getForm(db, config, "login", oauthBrowser));
@@ -225,8 +274,17 @@ export function googleForms(config: AuthConfig, database: AuthDb | undefined) {
           await authEvent(db, "login", "blocked", item ? item.client_id : null);
           return null;
         }
-        await authEvent(db, "login", "success", item ? item.client_id : null);
-        if (!item) return { token: await session.create(db, userId) } as const;
+        await authEvent(
+          db,
+          "login",
+          "success",
+          item ? item.client_id : null,
+          userId,
+        );
+        if (!item)
+          return {
+            token: await session.create(db, userId, identity.email),
+          } as const;
         const csrf = newToken();
         await sql`UPDATE oauth_authorization_codes SET phase = 'consent', user_id = ${userId},
         csrf_hash = ${digest(csrf)}, expires_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE)
@@ -272,7 +330,9 @@ export function authorizationForms(
         !(await getForm(database, config, "login", form.browser, form.csrf))
       )
         return invalidForm(response);
-      await googleLogin(config, database).start(response, form.browser);
+      await googleLogin(config, database).start(response, {
+        oauthBrowser: form.browser,
+      });
     },
   );
 

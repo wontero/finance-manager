@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { sql, type Kysely } from "kysely";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createApp } from "./app.js";
 import { digest } from "./auth-store.js";
 import { readConfig } from "./config.js";
@@ -372,16 +372,21 @@ export function googleSpecs(schema: string, readonlySchema: string) {
         })
         .expect(201);
       const { access_token } = await issue(client_id, "rate-a");
-      await rpc(access_token, "ping").expect(200);
-      for (let i = 0; i < 119; i++)
-        await http.get("/api/session").set("Cookie", c).expect(200);
-      await http
-        .get("/api/session")
-        .set("Cookie", c)
-        .expect(429)
-        .expect(/Demasiadas solicitudes/);
-      await rpc(access_token, "ping", {}, client()).expect(429);
-      await http.get("/api/session").set("Cookie", d).expect(200);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+      try {
+        await rpc(access_token, "ping").expect(200);
+        for (let i = 0; i < 119; i++)
+          await http.get("/api/session").set("Cookie", c).expect(200);
+        await http
+          .get("/api/session")
+          .set("Cookie", c)
+          .expect(429)
+          .expect(/Demasiadas solicitudes/);
+        await rpc(access_token, "ping", {}, client()).expect(429);
+        await http.get("/api/session").set("Cookie", d).expect(200);
+      } finally {
+        clock.mockRestore();
+      }
     });
   });
 }

@@ -11,7 +11,7 @@ const rowLimit = 500;
 // Se reserva espacio para el resumen y la envoltura JSON-RPC.
 const byteLimit = 64 * 1024 - 1024;
 // Las vistas TEMPTABLE deben materializar el ámbito del usuario antes del WHERE externo.
-export const readonlyStatementPrefix =
+const readonlyStatementPrefix =
   "SET STATEMENT max_statement_time=5, optimizer_switch='condition_pushdown_for_derived=off,split_materialized=off' FOR ";
 const output = z.object({
   filas: z.array(z.record(z.string(), z.json())),
@@ -68,12 +68,24 @@ export type ReadonlySql = {
 };
 
 export async function clearReadonlySessions(db: Kysely<unknown>) {
-  await sql`DELETE FROM readonly_sql_sessions
+  const cleanup = sql`DELETE FROM readonly_sql_sessions
     WHERE expires_at <= UTC_TIMESTAMP(3)
-       OR NOT (IS_USED_LOCK(lock_name) <=> connection_id)`.execute(db);
+       OR NOT (IS_USED_LOCK(lock_name) <=> connection_id)`;
+  try {
+    await cleanup.execute(db);
+  } catch (error) {
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !("errno" in error) ||
+      error.errno !== 1213
+    )
+      throw error;
+    await cleanup.execute(db);
+  }
 }
 
-async function select(
+export async function select(
   db: Kysely<unknown>,
   reader: ReadonlySql,
   userId: string,

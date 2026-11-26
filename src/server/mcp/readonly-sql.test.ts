@@ -5,6 +5,21 @@ import type { Kysely } from "kysely";
 import type { Pool } from "mysql2";
 import { expect, test, vi } from "vitest";
 import { registerSql } from "./readonly-sql.js";
+import { validateSources } from "./sql-sources.js";
+
+test("M-024: valida las fuentes de las ramas de UNION en grupos y CTE", () => {
+  for (const body of ["(SELECT 1 AS id)", "VALUES (1)"]) {
+    const sql = (source: string) =>
+      `WITH datos AS (${body} UNION SELECT id FROM ${source}) SELECT id FROM datos`;
+    expect(() => validateSources(sql("v_accounts"), [])).not.toThrow();
+    expect(() => validateSources(sql("tabla_no_autorizada"), [])).toThrow(
+      /vistas autorizadas/,
+    );
+  }
+  expect(() =>
+    validateSources("SELECT EXTRACT(YEAR FROM created_at) FROM v_accounts", []),
+  ).not.toThrow();
+});
 
 test("M-023C S1: rechaza comentarios de línea y separadores ajenos a MariaDB", async () => {
   const getConnection = vi.fn((callback) => callback(new Error("sin lector")));

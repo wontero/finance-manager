@@ -17,7 +17,12 @@ const claims = z.object({
   nonce: z.string(),
 });
 type Identity = z.infer<typeof claims>;
-type Challenge = { nonce: string; verifier: string; for_oauth: number };
+type Challenge = {
+  nonce: string;
+  verifier: string;
+  for_oauth: number;
+  reauth_session_hash: Buffer | null;
+};
 
 export function googleLogin(config: AuthConfig, db: AuthDb) {
   const google = config.google!;
@@ -30,7 +35,13 @@ export function googleLogin(config: AuthConfig, db: AuthDb) {
   } as const;
 
   return {
-    async start(response: Response, oauthBrowser?: string) {
+    async start(
+      response: Response,
+      {
+        oauthBrowser,
+        sessionHash,
+      }: { oauthBrowser?: string; sessionHash?: Buffer } = {},
+    ) {
       const browser = oauthBrowser ?? newToken();
       const state = newToken();
       const verifier = newToken();
@@ -38,8 +49,8 @@ export function googleLogin(config: AuthConfig, db: AuthDb) {
       await sql`DELETE FROM google_login_requests WHERE expires_at <= UTC_TIMESTAMP(3)`.execute(
         db,
       );
-      await sql`INSERT INTO google_login_requests (state_hash, browser_hash, verifier, nonce, for_oauth, expires_at)
-        VALUES (${digest(state)}, ${digest(browser)}, ${verifier}, ${nonce}, ${Boolean(oauthBrowser)},
+      await sql`INSERT INTO google_login_requests (state_hash, browser_hash, verifier, nonce, for_oauth, reauth_session_hash, expires_at)
+        VALUES (${digest(state)}, ${digest(browser)}, ${verifier}, ${nonce}, ${Boolean(oauthBrowser)}, ${sessionHash ?? null},
         DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 10 MINUTE))`.execute(db);
       const authorization = new URL(google.authorizationUrl);
       authorization.search = new URLSearchParams({
@@ -52,6 +63,8 @@ export function googleLogin(config: AuthConfig, db: AuthDb) {
         state,
         nonce,
       }).toString();
+      if (sessionHash)
+        authorization.searchParams.set("prompt", "select_account");
       response
         .cookie(cookie, browser, { ...cookieOptions, maxAge: 600_000 })
         .redirect(303, authorization.href);
@@ -71,7 +84,7 @@ export function googleLogin(config: AuthConfig, db: AuthDb) {
         const {
           rows: [challenge],
         } = await sql<Challenge>`
-          SELECT verifier, nonce, for_oauth FROM google_login_requests
+          SELECT verifier, nonce, for_oauth, reauth_session_hash FROM google_login_requests
           WHERE state_hash = ${key} AND browser_hash = ${digest(browser)}
             AND expires_at > UTC_TIMESTAMP(3) FOR UPDATE
         `.execute(trx);
@@ -132,6 +145,7 @@ export function googleLogin(config: AuthConfig, db: AuthDb) {
         return {
           identity,
           oauthBrowser: challenge.for_oauth ? browser : undefined,
+          sessionHash: challenge.reauth_session_hash,
         };
       } catch {
         return;
@@ -152,9 +166,8 @@ export async function resolveGoogleUser(
       SELECT id FROM users WHERE google_sub = ${identity.sub}
     `.execute(trx);
   if (existing) {
-    await sql`UPDATE users SET last_seen_at = UTC_TIMESTAMP(3) WHERE id = ${existing.id}`.execute(
-      trx,
-    );
+    await sql`UPDATE users SET email = ${email}, display_name = ${identity.name ?? null},
+      last_seen_at = UTC_TIMESTAMP(3) WHERE id = ${existing.id}`.execute(trx);
     return existing.id;
   }
   if (email === config.firstUserEmail) {
@@ -177,4 +190,15 @@ export async function resolveGoogleUser(
   const userId = insertId!.toString();
   await provisionUser(trx, userId);
   return userId;
+}
+
+export async function warnUnlinkedOwner(db: AuthDb) {
+  const { rows } = await sql`
+    SELECT id FROM users WHERE id = 1 AND google_sub IS NULL
+      AND EXISTS (SELECT 1 FROM users WHERE id <> 1)
+  `.execute(db);
+  if (rows.length)
+    console.warn(
+      "El usuario #1 todavía no está vinculado y ya hay otros usuarios. Revisa que FIRST_USER_EMAIL sea el correo principal de su cuenta Google.",
+    );
 }

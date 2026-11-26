@@ -198,14 +198,14 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
         throw invalidGrant();
       if (row.phase === "used") {
         await revokeFamily(db, row.id, row.user_id);
-        await authEvent(db, "issue", "replay", client.client_id);
+        await authEvent(db, "issue", "replay", client.client_id, row.user_id);
         return null;
       }
       await sql`UPDATE oauth_authorization_codes SET phase = 'used' WHERE id = ${row.id}`.execute(
         db,
       );
       const issued = await this.issueTokens(db, client, row.id, row.user_id);
-      await authEvent(db, "issue", "success", client.client_id);
+      await authEvent(db, "issue", "success", client.client_id, row.user_id);
       return issued;
     });
     if (!tokens) throw invalidGrant();
@@ -233,11 +233,17 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
       `.execute(db);
       if (row?.rotated_at) {
         await revokeFamily(db, row.family_id, row.user_id);
-        await authEvent(db, "refresh", "replay", client.client_id);
+        await authEvent(db, "refresh", "replay", client.client_id, row.user_id);
         return null;
       }
       if (!row?.active || row.revoked_at) {
-        await authEvent(db, "refresh", "invalid", client.client_id);
+        await authEvent(
+          db,
+          "refresh",
+          "invalid",
+          client.client_id,
+          row?.user_id,
+        );
         return null;
       }
       await sql`UPDATE oauth_tokens SET rotated_at = UTC_TIMESTAMP(3), revoked_at = UTC_TIMESTAMP(3)
@@ -249,7 +255,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
         row.user_id,
         row.family_expires_at,
       );
-      await authEvent(db, "refresh", "success", client.client_id);
+      await authEvent(db, "refresh", "success", client.client_id, row.user_id);
       return issued;
     });
     if (!tokens) throw invalidGrant();
@@ -343,6 +349,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
         "revoke",
         row ? "success" : "invalid",
         client.client_id,
+        row?.user_id,
       );
     });
   }

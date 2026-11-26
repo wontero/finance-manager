@@ -12,6 +12,7 @@ import {
   type RowDataPacket,
 } from "mysql2/promise";
 import { afterAll, beforeAll, expect, test } from "vitest";
+import { accountSpecs } from "./account-specs.js";
 import { dashboardSpecs } from "./dashboard-specs.js";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
@@ -55,6 +56,7 @@ const tables = [
   "postings",
   "readonly_sql_schema",
   "readonly_sql_sessions",
+  "request_metrics",
   "tags",
   "transaction_tags",
   "transactions",
@@ -1366,3 +1368,4 @@ authSpecs(() => ({ app, reader }));
 mcpSpecs(() => migration, schema, readOnlySchema);
 multiuserSpecs(schema, readOnlySchema);
 dashboardSpecs(schema);
+accountSpecs(schema, readOnlySchema);

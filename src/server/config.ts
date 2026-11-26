@@ -112,6 +112,13 @@ const configSchema = z.object({
     .trim()
     .pipe(z.email("FIRST_USER_EMAIL debe ser un correo válido").max(320))
     .optional(),
+  METRICS_EMAIL: z
+    .string()
+    .trim()
+    .pipe(z.email("METRICS_EMAIL debe ser un correo válido").max(320))
+    .optional(),
+  OPERATOR_NAME: z.string().trim().min(1).max(160).optional(),
+  OPERATOR_CONTACT: z.string().trim().min(1).max(320).optional(),
   GOOGLE_AUTHORIZATION_URL: z
     .string()
     .default("https://accounts.google.com/o/oauth2/v2/auth"),
@@ -265,6 +272,11 @@ export function readConfig(env: NodeJS.ProcessEnv) {
     readonlyDatabase: readonly && connectionOptions(readonly, socketPath),
     webDistDir: resolve(config.WEB_DIST_DIR),
     version: config.APP_VERSION,
+    privacy: {
+      operatorName: config.OPERATOR_NAME ?? "Operador de esta instancia",
+      operatorContact: config.OPERATOR_CONTACT ?? "Contacto sin configurar",
+      metricsEmail: config.METRICS_EMAIL?.toLowerCase(),
+    },
     auth: {
       issuer,
       resource: new URL("/mcp", issuer),

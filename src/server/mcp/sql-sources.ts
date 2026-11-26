@@ -31,10 +31,20 @@ function keyword(token: Token | undefined) {
   return typeof token === "string" ? token.toLowerCase() : "";
 }
 
+function queryGroup(tokens: Token[]) {
+  return (
+    ["select", "with", "values"].includes(keyword(tokens[0])) ||
+    (Array.isArray(tokens[0]) &&
+      tokens.some((token) =>
+        ["union", "except", "intersect"].includes(keyword(token)),
+      ))
+  );
+}
+
 function subqueries(tokens: Token[], ctes: ReadonlySet<string>) {
   for (const token of tokens) {
     if (!Array.isArray(token)) continue;
-    if (["select", "with"].includes(keyword(token[0]))) query(token, ctes);
+    if (queryGroup(token)) query(token, ctes);
     else subqueries(token, ctes);
   }
 }
@@ -48,7 +58,7 @@ function sources(
     const token = tokens[index];
     if (tokens[index + 1] === "." || Array.isArray(tokens[index + 1])) denied();
     if (Array.isArray(token)) {
-      if (["select", "with"].includes(keyword(token[0]))) query(token, ctes);
+      if (queryGroup(token)) query(token, ctes);
       else sources(token, ctes, true);
     } else {
       const name = identifier(token);
@@ -93,8 +103,9 @@ function query(tokens: Token[], inherited: ReadonlySet<string>) {
       ctes.add(name);
     } while (tokens[i] === ",");
   }
-  if (keyword(tokens[i]) !== "select") denied();
-  sources(tokens.slice(i + 1), ctes);
+  const body = tokens.slice(i);
+  if (!queryGroup(body)) denied();
+  sources(body, ctes);
 }
 
 export function validateSources(statement: string, schemas: readonly string[]) {

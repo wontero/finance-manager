@@ -15,6 +15,8 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": "http://127.0.0.1:" + PORT,
         "/auth/google": "http://127.0.0.1:" + PORT,
+        "/privacidad": "http://127.0.0.1:" + PORT,
+        "/metricas": "http://127.0.0.1:" + PORT,
       },
     },
   };

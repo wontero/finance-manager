@@ -31,13 +31,17 @@ export async function allowUserRequest(
     rows: [counter],
   } = await sql<{ hits: number }>`
     INSERT INTO user_request_limits (user_id, minute_bucket, hits)
-    VALUES (${userId}, UNIX_TIMESTAMP() DIV 60, 1)
+    VALUES (${userId}, ${Math.floor(Date.now() / 60_000)}, 1)
     ON DUPLICATE KEY UPDATE
       hits = IF(minute_bucket >= VALUES(minute_bucket), LEAST(hits + 1, ${limit + 1}), 1),
       minute_bucket = GREATEST(minute_bucket, VALUES(minute_bucket))
     RETURNING hits
   `.execute(db);
-  if (counter.hits <= limit) return true;
+  if (counter.hits <= limit) {
+    await sql`UPDATE users SET last_seen_at = UTC_TIMESTAMP(3)
+      WHERE id = CAST(${userId} AS UNSIGNED)`.execute(db);
+    return true;
+  }
   response
     .set({ "Cache-Control": "no-store", "Retry-After": "60" })
     .status(429)

@@ -7,6 +7,7 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { Account } from "./account";
 import { Activity } from "./activity";
 import { Accounts } from "./accounts";
 import { errorText, type Api } from "./api";
@@ -54,6 +55,13 @@ const pages = [
     title: "Actividad de Claude",
     icon: "M12 7v5l3 2M4 4v5h5M4 9a9 9 0 1 1-.2 5",
     Screen: Activity,
+  },
+  {
+    path: "/cuenta",
+    label: "Cuenta",
+    title: "Cuenta",
+    icon: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2",
+    Screen: Account,
   },
 ] as const;
 
@@ -138,7 +146,10 @@ export function App() {
       if (response.status === 204) return undefined as T;
       const data = await response.json();
       if (!response.ok)
-        throw new Error(data.error ?? "No se pudo completar la solicitud.");
+        throw Object.assign(
+          new Error(data.error ?? "No se pudo completar la solicitud."),
+          { status: response.status },
+        );
       return data as T;
     },
     [],
@@ -212,6 +223,9 @@ export function App() {
               <Button asChild>
                 <a href="/auth/google/start">Iniciar sesión con Google</a>
               </Button>
+              <p>
+                <a href="/privacidad">Privacidad y términos</a>
+              </p>
             </>
           )}
         </section>
@@ -263,7 +277,7 @@ export function App() {
         <main className="content">
           <Alert error={error} />
           <Suspense fallback={<Loading />}>
-            <page.Screen api={api} />
+            <page.Screen api={api} onDeleted={() => setSession("anonymous")} />
           </Suspense>
         </main>
       </div>

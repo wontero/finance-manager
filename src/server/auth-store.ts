@@ -62,10 +62,11 @@ export function authEvent(
   type: "login" | "issue" | "refresh" | "revoke",
   outcome: "success" | "invalid" | "blocked" | "replay" | "error",
   clientId: string | null = null,
+  userId: string | null = null,
 ) {
   const context = authContext.getStore();
-  return sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id)
-    VALUES (${type}, ${outcome}, ${context?.ip ?? null}, ${context?.agent ?? null}, ${clientId})
+  return sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id, user_id)
+    VALUES (${type}, ${outcome}, ${context?.ip ?? null}, ${context?.agent ?? null}, ${clientId}, ${userId})
   `.execute(db);
 }
 
@@ -119,5 +120,5 @@ export async function revokeAll(db: AuthDb, userId: string) {
     WHERE user_id = CAST(${userId} AS UNSIGNED) AND phase <> 'used'`.execute(
     db,
   );
-  await authEvent(db, "revoke", "success");
+  await authEvent(db, "revoke", "success", null, userId);
 }

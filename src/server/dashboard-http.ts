@@ -8,6 +8,7 @@ import {
 } from "@finance-manager/core";
 import express, { type ErrorRequestHandler } from "express";
 import { z } from "zod";
+import { deleteAccount, exportAccount } from "./account.js";
 import type { AuthConfig } from "./auth-provider.js";
 import { allowUserRequest } from "./auth-rate-limit.js";
 import { authTransaction, revokeAll, type AuthDb } from "./auth-store.js";
@@ -117,11 +118,42 @@ export function dashboardApi(config: AuthConfig, db?: AuthDb) {
       session.clear(response);
       return;
     }
+    response.locals.session = active;
     response.locals.ledger = createLedger(db, "web", active.userId);
     next();
   });
 
   router.get("/session", (_request, response) => response.json(authenticated));
+  if (db) {
+    router.get("/account/export", async (_request, response) => {
+      const data = await exportAccount(db, response.locals.session.userId);
+      if (!data.profile)
+        return response
+          .status(401)
+          .json({ error: "Inicia sesión para continuar." });
+      return response.attachment("finance-manager-datos.json").json(data);
+    });
+    router.delete(
+      "/account",
+      express.json({ limit: "1kb" }),
+      async (request, response) => {
+        if (request.body?.confirmation !== "BORRAR")
+          return response
+            .status(400)
+            .json({ error: "Escribe BORRAR para confirmar." });
+        const result = await deleteAccount(db, response.locals.session);
+        if (result === "stale")
+          return response.status(428).json({
+            error: "Vuelve a iniciar sesión con Google para borrar tu cuenta.",
+          });
+        if (result === "inactive")
+          return response
+            .status(401)
+            .json({ error: "Inicia sesión para continuar." });
+        session.clear(response);
+      },
+    );
+  }
   router.get("/summary", async (request, response) => {
     const { month = todayLaPaz().slice(0, 7) } = z
       .strictObject({ month: monthInput.optional() })

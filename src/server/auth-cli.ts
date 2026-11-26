@@ -41,7 +41,7 @@ async function manageTokens(
     if (!row)
       throw new UsageError("No existe ese token para el usuario indicado.");
     await revokeFamily(trx, row.family_id, userId);
-    await authEvent(trx, "revoke", "success", row.client_id);
+    await authEvent(trx, "revoke", "success", row.client_id, userId);
   });
   console.log("Revocación completada.");
 }

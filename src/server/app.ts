@@ -3,6 +3,7 @@ import { extname } from "node:path";
 import { APP_NAME } from "@finance-manager/core";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
+import { warnUnlinkedOwner } from "./auth-google.js";
 import { installAuth } from "./auth-http.js";
 import { allowUserRequest } from "./auth-rate-limit.js";
 import type { readConfig } from "./config.js";
@@ -10,6 +11,7 @@ import { dashboardApi, dashboardHeaders } from "./dashboard-http.js";
 import { checkDatabase, createDatabase } from "./database.js";
 import { createMcp } from "./mcp/index.js";
 import { clearReadonlySessions } from "./mcp/readonly-sql.js";
+import { countRequests, installPrivacyPages } from "./privacy-pages.js";
 
 type Config = ReturnType<typeof readConfig>;
 
@@ -19,7 +21,7 @@ function setDashboardHeaders(response: ServerResponse) {
 }
 
 export function createApp(
-  { auth, database, readonlyDatabase, webDistDir, version }: Config,
+  { auth, database, privacy, readonlyDatabase, webDistDir, version }: Config,
   release?: string,
   connection = database && createDatabase(database),
 ) {
@@ -41,6 +43,12 @@ export function createApp(
     void clearReadonlySessions(connection.db).catch(() => {
       console.error("No se pudieron limpiar las sesiones SQL de solo lectura.");
     });
+  if (connection)
+    void warnUnlinkedOwner(connection.db).catch(() => {
+      console.error("No se pudo comprobar la vinculación del usuario #1.");
+    });
+  app.use("/mcp", countRequests(connection?.db, "mcp"));
+  app.use("/api", countRequests(connection?.db, "api"));
   const requireAuth = installAuth(app, auth, connection?.db);
   let probe: ReturnType<typeof checkDatabase> | undefined;
   let expiresAt = Infinity;
@@ -94,6 +102,7 @@ export function createApp(
   });
 
   app.use("/api", dashboardApi(auth, connection?.db));
+  installPrivacyPages(app, auth, privacy, connection?.db);
   app.use(express.static(webDistDir, { setHeaders: setDashboardHeaders }));
   app.get("/{*path}", (request, response, next) => {
     const segments = request.params.path;

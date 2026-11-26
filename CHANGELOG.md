@@ -6,6 +6,8 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Añadido
 
+- Sección **Cuenta** para descargar los datos propios con montos exactos y borrar la cuenta, con un nuevo inicio de sesión de Google cuando la sesión supera diez minutos.
+- Página pública **Privacidad y términos** y panel de métricas agregadas por canal, accesible con la cuenta de Google configurada.
 - Pantalla de cuentas con saldos y totales por moneda, archivadas y acceso a movimientos filtrados.
 - Esquema y ledger con propiedad por usuario, migración de los datos existentes al usuario #1 y topes contables configurables por usuario.
 - Dashboard web con inicio de sesión, resumen, movimientos con filtros, informes y deshacer desde la actividad.
@@ -22,6 +24,8 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Corregido
 
+- El servidor advierte si el usuario #1 sigue sin vincular y ya existen otros usuarios. La prueba del límite por minuto usa un reloj controlado.
+- Las consultas SQL validan las fuentes en grupos con operaciones de conjuntos y reintentan la limpieza de mapeos ante un interbloqueo.
 - Las respuestas MCP incluyen los datos estructurados en el texto para clientes que no leen `structuredContent`.
 - La comprobación de salud del despliegue usa un User-Agent propio para evitar el rechazo de ModSecurity al User-Agent por defecto de `curl`.
 

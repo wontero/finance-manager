@@ -114,6 +114,11 @@ test("M-015 S7: login, cuatro pantallas con datos, confirmar undo y volver al lo
       await screen.findByRole("link", { name: "Iniciar sesión con Google" })
     ).getAttribute("href"),
   ).toBe("/auth/google/start");
+  expect(
+    screen
+      .getByRole("link", { name: "Privacidad y términos" })
+      .getAttribute("href"),
+  ).toBe("/privacidad");
   cleanup();
   active = true;
   render(<App />);
@@ -140,6 +145,40 @@ test("M-015 S7: login, cuatro pantallas con datos, confirmar undo y volver al lo
       screen.getByRole("link", { name: "Iniciar sesión con Google" }),
     ).toBeDefined(),
   );
+}, 10_000);
+
+test("M-024: Cuenta enlaza la descarga y solicita Google para una sesión antigua", async () => {
+  history.replaceState(null, "", "/cuenta");
+  const fetchApi = vi.fn(async (url: string, options?: RequestInit) => {
+    if (url === "/api/session") return Response.json({ authenticated: true });
+    expect(url).toBe("/api/account");
+    expect(options?.method).toBe("DELETE");
+    expect(options?.body).toBe(JSON.stringify({ confirmation: "BORRAR" }));
+    return Response.json(
+      { error: "Vuelve a iniciar sesión con Google." },
+      { status: 428 },
+    );
+  });
+  vi.stubGlobal("fetch", fetchApi);
+  render(<App />);
+  const download = await screen.findByRole("link", {
+    name: /Exportar mis datos/,
+  });
+  expect(download.getAttribute("href")).toBe("/api/account/export");
+  expect(download.hasAttribute("download")).toBe(true);
+  const submit = screen.getByRole<HTMLButtonElement>("button", {
+    name: "Borrar mi cuenta",
+  });
+  expect(submit.disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText("Confirmación"), {
+    target: { value: "BORRAR" },
+  });
+  fireEvent.click(submit);
+  const reauth = await screen.findByRole<HTMLButtonElement>("button", {
+    name: "Volver a iniciar sesión con Google",
+  });
+  expect(reauth.form?.getAttribute("action")).toBe("/auth/google/reauth");
+  expect(reauth.form?.method).toBe("post");
 });
 
 test("M-015 S7: los formatos es-BO conservan decimales y fechas contables", () => {

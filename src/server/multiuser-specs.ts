@@ -14,7 +14,7 @@ import { createDatabase } from "./database.js";
 import { createLedger, provisionUser } from "./ledger/index.js";
 import { ledgerLimits } from "./ledger/limits.js";
 import { createMcp } from "./mcp/index.js";
-import { readonlyStatementPrefix } from "./mcp/readonly-sql.js";
+import { select } from "./mcp/readonly-sql.js";
 import { localDatabase } from "./scripts/local-database.js";
 
 const date = "1997-11-11";
@@ -31,7 +31,7 @@ const field = {
   type: "text",
 } as const;
 
-async function seed(
+export async function seed(
   db: Kysely<unknown>,
   userId: string,
   name: string,
@@ -297,28 +297,57 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
       }, 10_000);
 
       test("M-023C S2: EXPLAIN conserva la condición externa fuera de la vista", async () => {
+        const planner = createDatabase({
+          ...localDatabase("MIGRATION_DATABASE_URL"),
+          database: readonlySchema,
+        });
         const connection = await createConnection({
           ...localDatabase("MIGRATION_DATABASE_URL"),
           database: readonlySchema,
         });
         const lock = randomUUID();
         try {
+          for (const [view, column, pattern] of [
+            ["v_accounts", "name", "privado%"],
+            ["v_postings", "account_name", "privado%"],
+            ["v_transaction_tags", "CAST(tag_id AS CHAR)", "1%"],
+            ["v_exchange_rates", "source", "privado%"],
+          ]) {
+            const { filas, recortado } = await select(
+              db,
+              {
+                pool: planner.pool,
+                mainSchema: schema,
+                schema: readonlySchema,
+              },
+              aId,
+              `EXPLAIN FORMAT=JSON SELECT * FROM ${view} WHERE ${column} LIKE '${pattern}'`,
+            );
+            expect(recortado).toBe(false);
+            const outer = JSON.parse(String(filas[0].EXPLAIN)).query_block
+              .table;
+            expect(outer.attached_condition, view).toContain(pattern);
+            expect(JSON.stringify(outer.materialized), view).toContain(
+              "user_id",
+            );
+            expect(JSON.stringify(outer.materialized), view).not.toContain(
+              pattern,
+            );
+          }
+
           await connection.execute("SELECT GET_LOCK(?, 0)", [lock]);
           await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
             VALUES (${connection.threadId}, ${aId}, ${lock}, UTC_TIMESTAMP(3) + INTERVAL 10 SECOND)`.execute(
             db,
           );
           const [[plan]] = await connection.query<RowDataPacket[]>(
-            readonlyStatementPrefix +
-              "EXPLAIN FORMAT=JSON SELECT name FROM v_accounts WHERE name LIKE 'privado%'",
+            "EXPLAIN FORMAT=JSON SELECT name FROM v_accounts WHERE name LIKE 'privado%'",
           );
           const outer = JSON.parse(plan.EXPLAIN).query_block.table;
-          expect(outer.attached_condition).toContain("privado%");
-          expect(outer.materialized).toBeDefined();
-          expect(JSON.stringify(outer.materialized)).toContain("user_id");
-          expect(JSON.stringify(outer.materialized)).not.toContain("privado%");
+          expect(JSON.stringify(outer.materialized)).toContain("privado%");
         } finally {
           await connection.end();
+          await planner.db.destroy();
           await sql`DELETE FROM readonly_sql_sessions WHERE lock_name = ${lock}`.execute(
             db,
           );

@@ -26,3 +26,4 @@ Claude opera con mucha autonomía (incluida la carga masiva de historial leído 
 - Un lote mal leído se revierte entero con una orden.
 - El dashboard puede mostrar la actividad de Claude con un botón de deshacer.
 - Las consultas habituales filtran los registros borrados lógicamente y la bitácora crece con la actividad de los usuarios.
+- El borrado confirmado de una cuenta elimina su bitácora y sus operaciones en la misma transacción que sus demás datos. La clave foránea desde `operations` a `users` y la clave compuesta desde `audit_log` a `operations` encadenan el borrado por usuario. MariaDB ejecuta la cascada sin disparar los triggers. Los triggers siguen rechazando `UPDATE` y `DELETE` directos sobre `audit_log`, y otro trigger impide borrar `operations` directamente. La ruta autenticada de borrado de cuenta es la única que elimina un usuario. [Claves foráneas de MariaDB](https://mariadb.com/docs/server/architecture/server-constraints/foreign-key-constraints)

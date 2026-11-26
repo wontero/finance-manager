@@ -1,6 +1,6 @@
 # FinanceManager
 
-FinanceManager es un servidor MCP remoto (Model Context Protocol) que permite a Claude.ai registrar y consultar finanzas personales conversando. Mantiene un libro contable auditable de partida doble y multimoneda (BOB/USD). Está construido con Node.js 22, TypeScript, Express y MariaDB 10.6, con OAuth 2.1 y un dashboard web en React. Se aloja en cPanel con Passenger; el servidor no llama a ninguna API de IA, así que la aplicación no añade coste de IA.
+FinanceManager es una aplicación multiusuario con un servidor MCP remoto (Model Context Protocol) que permite a Claude.ai registrar y consultar finanzas personales conversando. Cada usuario tiene su propio libro contable auditable de partida doble y multimoneda (BOB/USD). Está construido con Node.js 22, TypeScript, Express y MariaDB 10.6, con OAuth 2.1 y un dashboard web en React. Se aloja en cPanel con Passenger. El servidor no llama a ninguna API de IA, así que la aplicación no añade coste de IA.
 
 ## Funcionalidades
 
@@ -10,6 +10,8 @@ FinanceManager es un servidor MCP remoto (Model Context Protocol) que permite a 
 - Registra la cotización oficial USD/BOB consultada a través de CUCU, un tercero sin afiliación al BCB, o permite anotarla manualmente.
 - Permite consultar y deshacer operaciones, además de consultar datos mediante SQL de solo lectura.
 - Ofrece un dashboard de resumen, movimientos, informes y actividad de Claude.
+- Permite exportar los datos propios en JSON y borrar la cuenta desde el dashboard. La página pública **Privacidad y términos** explica qué datos se guardan.
+- Muestra métricas agregadas de uso a la cuenta designada por el operador en la configuración.
 - Protege el acceso y permite crear copias cifradas con guías de despliegue y recuperación.
 
 ## Stack
@@ -73,10 +75,11 @@ Abre la raíz del sitio y pulsa **Iniciar sesión con Google**. Usa la misma cue
 - **Cuentas** muestra saldos de activos y pasivos por moneda, permite incluir archivadas y abrir sus movimientos.
 - **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
 - **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
+- **Cuenta** descarga tus datos en JSON con montos decimales exactos. Para borrar tus datos y revocar el acceso de Claude, escribe `BORRAR`. Si han pasado más de diez minutos desde que iniciaste sesión, vuelve a entrar con la misma cuenta de Google y confirma de nuevo.
 
 La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El inicio de sesión se limita por IP y se registra en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. El administrador puede revocar todas las sesiones y conexiones de un usuario con `npm run auth:tokens -- revoke-all <usuario>`.
 
-Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía `/api` al puerto de Express. Con Express sirviendo el build, usa el origen de Express.
+Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía la API, el login, la página de privacidad y el panel de métricas a Express. Con Express sirviendo el build, usa el origen de Express.
 
 ## Decisiones técnicas
 

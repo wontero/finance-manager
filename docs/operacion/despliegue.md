@@ -66,12 +66,19 @@ Espera Node 22, el cliente de MariaDB 10.6 y un GPG con soporte de `--pinentry-m
    # DATABASE_SOCKET=/ruta/absoluta/mysql.sock
    GOOGLE_CLIENT_ID=<id-cliente-google>
    GOOGLE_CLIENT_SECRET=<secreto-cliente-google>
-   FIRST_USER_EMAIL=<correo-verificado>
+   FIRST_USER_EMAIL=<correo-principal-de-google>
+   OPERATOR_NAME="<nombre-del-operador>"
+   OPERATOR_CONTACT=<contacto-publico-del-operador>
+   # METRICS_EMAIL=<correo-verificado-para-metricas>
    # MAX_USERS=50
    # MAX_REQUESTS_PER_USER_PER_MINUTE=120
    ```
 
    Completa las credenciales como se indica en [Cliente OAuth en Google Cloud](#cliente-oauth-en-google-cloud). La migración retira `TOTP_ENCRYPTION_KEY` de la configuración. Elimina esa variable de `shared/.env`.
+
+   > **Importante:** `FIRST_USER_EMAIL` debe ser exactamente el correo principal de la cuenta de Google de quien instala. Si el correo difiere, el primer inicio de sesión crea un usuario vacío cuando hay cupo y los datos previos quedan en el #1. Al arrancar, el servidor avisa en el log si el #1 sigue sin vincular y ya existen otros usuarios.
+
+   Publica el nombre y un contacto del operador en `OPERATOR_NAME` y `OPERATOR_CONTACT`. Ambos se muestran en `/privacidad`. Para habilitar `/metricas`, define `METRICS_EMAIL` con el correo verificado de la cuenta de Google autorizada y vuelve a iniciar sesión. El panel muestra cifras agregadas y agrupa las peticiones por día UTC.
 
    `MAX_USERS` incluye la cuenta de los datos existentes. El valor `0` cierra el registro de usuarios nuevos y todavía permite vincular esa cuenta e iniciar sesión con cuentas existentes. El límite diario de altas contables se configura por separado. `MAX_REQUESTS_PER_USER_PER_MINUTE` aplica a las peticiones autenticadas de ambas interfaces y devuelve HTTP 429 al agotarse.
 
@@ -186,7 +193,7 @@ cPanel busca `app.js` en la raíz de la aplicación y el cargador documentado de
 
 1. Abre **Google Auth Platform** en el proyecto de Google Cloud. Completa la pantalla de consentimiento, elige audiencia **Externa** para admitir cuentas de Google de fuera de tu organización y publica la aplicación para salir del modo de prueba. En **Acceso a datos**, usa los ámbitos básicos `openid`, `email` y `profile`. [Configurar el consentimiento OAuth](https://developers.google.com/workspace/guides/configure-oauth-consent)
 2. En **Clientes**, crea un cliente OAuth de tipo **Aplicación web**. En **URIs de redireccionamiento autorizados**, añade `${PUBLIC_URL}/auth/google/callback` con el origen público real, por ejemplo `https://<dominio>/auth/google/callback`. La URI debe coincidir exactamente. [Configurar OpenID Connect en Google](https://developers.google.com/identity/openid-connect/openid-connect)
-3. Guarda el ID y el secreto del cliente en `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` en `shared/.env`. Configura `FIRST_USER_EMAIL` con el correo verificado de Google que vinculará los datos existentes y custodia el secreto como una credencial de despliegue.
+3. Guarda el ID y el secreto del cliente en `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` en `shared/.env`. Configura `FIRST_USER_EMAIL` con el correo principal de la cuenta de Google que vinculará los datos existentes y custodia el secreto como una credencial de despliegue.
 
 ### Reconecta Claude
 

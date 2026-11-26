@@ -14,10 +14,10 @@ export function webSession(secure: boolean) {
   } as const;
 
   return {
-    async create(db: AuthDb, userId: string) {
+    async create(db: AuthDb, userId: string, verifiedEmail: string) {
       const token = newToken();
-      await sql`INSERT INTO web_sessions (token_hash, user_id, created_at, expires_at)
-        VALUES (${digest(token)}, ${userId}, UTC_TIMESTAMP(3),
+      await sql`INSERT INTO web_sessions (token_hash, user_id, verified_email, created_at, expires_at)
+        VALUES (${digest(token)}, ${userId}, ${verifiedEmail.toLowerCase()}, UTC_TIMESTAMP(3),
         DATE_ADD(UTC_TIMESTAMP(3), INTERVAL ${seconds} SECOND))`.execute(db);
       return token;
     },
@@ -32,11 +32,12 @@ export function webSession(secure: boolean) {
       const hash = digest(token);
       const {
         rows: [row],
-      } = await sql<{ user_id: string }>`
-        SELECT user_id FROM web_sessions WHERE token_hash = ${hash}
-          AND revoked_at IS NULL AND expires_at > UTC_TIMESTAMP(3)
+      } = await sql<{ user_id: string; verified_email: string | null }>`
+        SELECT s.user_id, s.verified_email FROM web_sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = ${hash} AND s.revoked_at IS NULL AND s.expires_at > UTC_TIMESTAMP(3)
       `.execute(db);
-      if (row) return { hash, userId: row.user_id };
+      if (row)
+        return { hash, userId: row.user_id, verifiedEmail: row.verified_email };
     },
 
     async logout(
