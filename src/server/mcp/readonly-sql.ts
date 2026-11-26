@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
-import type { FieldPacket, Pool, PoolConnection } from "mysql2";
+import { sql, type Kysely } from "kysely";
+import type { FieldPacket, Pool, PoolConnection, RowDataPacket } from "mysql2";
 import { z } from "zod";
 import { readonlyViewDescription } from "../readonly-views.js";
+import { validateSources } from "./sql-sources.js";
 import { registerTool, type ToolServer } from "./tool.js";
 
 const rowLimit = 500;
@@ -51,12 +54,48 @@ function connectionFrom(pool: Pool) {
   });
 }
 
+export type ReadonlySql = {
+  pool: Pool;
+  mainSchema: string;
+  schema: string;
+};
+
+export async function clearReadonlySessions(db: Kysely<unknown>) {
+  await sql`DELETE FROM readonly_sql_sessions
+    WHERE expires_at <= UTC_TIMESTAMP(3)
+       OR NOT (IS_USED_LOCK(lock_name) <=> connection_id)`.execute(db);
+}
+
 async function select(
-  pool: Pool,
+  db: Kysely<unknown>,
+  reader: ReadonlySql,
+  userId: string,
   statement: string,
 ): Promise<z.output<typeof output>> {
-  const conn = await connectionFrom(pool);
+  const conn = await connectionFrom(reader.pool);
+  const connectionId = conn.threadId;
+  // MariaDB puede reutilizar el ID al reiniciar, pero pierde los bloqueos.
+  const lockName = "finance-sql:" + randomUUID();
+  let mappingAttempted = false;
   try {
+    const [[{ acquired }]] = await conn
+      .promise()
+      .execute<RowDataPacket[]>(
+        { sql: "SELECT GET_LOCK(?, 0) AS acquired", timeout: 750 },
+        [lockName],
+      );
+    if (acquired !== 1)
+      throw new Error("No se obtuvo el bloqueo de la sesión.");
+    mappingAttempted = true;
+    const { numAffectedRows } = await sql`
+      INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
+      SELECT ${connectionId}, ${userId}, ${lockName}, UTC_TIMESTAMP(3) + INTERVAL 10 SECOND
+      FROM readonly_sql_schema
+      WHERE name = ${reader.schema} AND IS_USED_LOCK(${lockName}) = ${connectionId}
+      ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), lock_name = VALUES(lock_name),
+        expires_at = VALUES(expires_at)
+    `.execute(db);
+    if (!numAffectedRows) throw new Error("No se pudo asignar la sesión.");
     await conn.promise().query("START TRANSACTION READ ONLY");
     const query = conn.query({
       sql: "SET STATEMENT max_statement_time=5 FOR " + statement,
@@ -101,14 +140,24 @@ async function select(
     // destroy() retira la conexión del pool, pero mysql2 solo hace end() al socket.
     conn.destroy();
     (conn as PoolConnection & { stream: Duplex }).stream.destroy();
+    if (mappingAttempted)
+      await sql`DELETE FROM readonly_sql_sessions
+        WHERE connection_id = ${connectionId} AND lock_name = ${lockName}`.execute(
+        db,
+      );
   }
 }
 
-export function registerSql(server: ToolServer, pool: Pool | undefined) {
+export function registerSql(
+  server: ToolServer,
+  db: Kysely<unknown>,
+  reader: ReadonlySql | undefined,
+  userId: string,
+) {
   registerTool(
     server,
     "consulta_sql",
-    "Consulta datos financieros con SQL de solo lectura. Vistas: " +
+    "Consulta tus datos financieros y los tipos de cambio oficiales con SQL de solo lectura. Vistas: " +
       readonlyViewDescription,
     z.object({
       sql: z
@@ -120,11 +169,12 @@ export function registerSql(server: ToolServer, pool: Pool | undefined) {
     output,
     "read",
     async ({ sql }) => {
-      if (!pool)
+      if (!reader)
         throw new Error("La consulta SQL de solo lectura no está disponible.");
       const statement = singleSelect(sql);
+      validateSources(statement, [reader.mainSchema, reader.schema]);
       try {
-        const data = await select(pool, statement);
+        const data = await select(db, reader, userId, statement);
         return [
           data,
           data.aviso ?? "Filas devueltas: " + data.filas.length + ".",

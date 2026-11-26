@@ -44,6 +44,7 @@ export function createDatabase(options: PoolOptions) {
     });
   return {
     pool,
+    schema: options.database,
     db: new Kysely<unknown>({ dialect: new MysqlDialect({ pool }) }),
   };
 }

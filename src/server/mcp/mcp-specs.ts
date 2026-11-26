@@ -178,9 +178,12 @@ export function mcpSpecs(
       const [sqlTransport, serverTransport] =
         InMemoryTransport.createLinkedPair();
       await Promise.all([
-        createMcp("finance-sql-tests", database.db, reader.pool, "1").connect(
-          serverTransport,
-        ),
+        createMcp(
+          "finance-sql-tests",
+          database.db,
+          { pool: reader.pool, mainSchema: schema, schema: readonly },
+          "1",
+        ).connect(serverTransport),
         sqlClient.connect(sqlTransport),
       ]);
       google = await fakeGoogle();
@@ -784,6 +787,15 @@ export function mcpSpecs(
       );
     });
 
+    const digits =
+      "WITH digits AS (" +
+      Array.from({ length: 10 }, (_, n) => `SELECT ${n} AS n`).join(
+        " UNION ALL ",
+      ) +
+      ") ";
+    const combinations = (length: number) =>
+      Array.from({ length }, (_, n) => `digits AS digit${n}`).join(", ");
+
     test("S8: SQL de lectura, permisos, tiempo máximo, filas y bytes", async () => {
       const consulta = (sql: string) => success("consulta_sql", { sql });
       expect(
@@ -817,14 +829,16 @@ export function mcpSpecs(
       await failure("consulta_sql", { sql: "SELECT SLEEP(10)" }, /5 segundos/i);
       expect(performance.now() - start).toBeGreaterThan(4000);
       expect(performance.now() - start).toBeLessThan(8500);
-      const truncated = await consulta("SELECT seq FROM seq_1_to_501");
+      const truncated = await consulta(
+        digits + "SELECT digit0.n FROM " + combinations(3),
+      );
       expect(truncated.filas).toHaveLength(500);
       expect(truncated).toMatchObject({
         recortado: true,
         aviso: expect.stringMatching(/500/),
       });
       const bytes = await consulta(
-        "SELECT REPEAT('á', 20000) AS texto FROM seq_1_to_10",
+        digits + "SELECT REPEAT('á', 20000) AS texto FROM digits",
       );
       expect(Buffer.byteLength(JSON.stringify(bytes))).toBeLessThanOrEqual(
         64 * 1024,
@@ -1037,9 +1051,11 @@ export function mcpSpecs(
 
     test("S13: ambos recortes cierran sus consultas y el lector sigue disponible", async () => {
       const consulta = (sql: string) => success("consulta_sql", { sql });
+      const large = combinations(8);
+      const wideQuery = "SELECT REPEAT('x',1000) FROM " + large;
       const [bytes, rows] = await Promise.all([
-        consulta("SELECT REPEAT('x',1000) FROM seq_1_to_100000000"),
-        consulta("SELECT CONNECTION_ID() AS conexion FROM seq_1_to_100000000"),
+        consulta(digits + wideQuery),
+        consulta(digits + "SELECT CONNECTION_ID() AS conexion FROM " + large),
       ]);
       expect(bytes).toMatchObject({
         recortado: true,
@@ -1066,7 +1082,7 @@ export function mcpSpecs(
             async () => {
               const [sessions] = await probe.query<RowDataPacket[]>(
                 "SELECT ID FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND (ID = ? OR INFO LIKE ?)",
-                [conexion, "%REPEAT('x',1000) FROM seq_1_to_100000000%"],
+                [conexion, "%" + wideQuery + "%"],
               );
               return sessions;
             },

@@ -1,12 +1,11 @@
 import { APP_NAME } from "@finance-manager/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Kysely } from "kysely";
-import type { Pool } from "mysql2";
 import { z } from "zod";
 import { createLedger } from "../ledger/index.js";
 import { registerLoanTools } from "./loan-tools.js";
 import { registerReads } from "./read-tools.js";
-import { registerSql } from "./readonly-sql.js";
+import { registerSql, type ReadonlySql } from "./readonly-sql.js";
 import { registerTool } from "./tool.js";
 import { registerWrites } from "./write-tools.js";
 
@@ -25,7 +24,7 @@ const instructions = [
 export function createMcp(
   version: string,
   db: Kysely<unknown> | undefined,
-  readonly: Pool | undefined,
+  readonly: ReadonlySql | undefined,
   userId: string,
 ) {
   const server = new McpServer({ name: APP_NAME, version }, { instructions });
@@ -54,7 +53,7 @@ export function createMcp(
     registerReads(server, ledger);
     registerWrites(server, ledger);
     registerLoanTools(server, ledger);
-    registerSql(server, readonly);
+    registerSql(server, db, readonly, userId);
   }
   return server;
 }

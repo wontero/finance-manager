@@ -1,8 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import express from "express";
 import { sql, type Kysely } from "kysely";
+import type { RowDataPacket } from "mysql2";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { digest, type AuthDb } from "./auth-store.js";
@@ -69,13 +70,230 @@ async function seed(
   return { ledger, parentId, category, cash, entry, loan, definition };
 }
 
-export function multiuserSpecs(schema: string) {
+export function multiuserSpecs(schema: string, readonlySchema: string) {
   describe("M-021: dos usuarios", () => {
     let db: Kysely<unknown>;
     let a: Awaited<ReturnType<typeof seed>>;
     let b: typeof a;
     let aId: string;
     let bId: string;
+
+    describe("M-023B consulta_sql", () => {
+      let reader: ReturnType<typeof createDatabase>;
+      const clients = [
+        new Client({ name: "m023b-a", version: "1" }),
+        new Client({ name: "m023b-b", version: "1" }),
+      ];
+      const call = (user: number, statement: string) =>
+        clients[user].callTool({
+          name: "consulta_sql",
+          arguments: { sql: statement },
+        });
+      async function rows(user: number, statement: string) {
+        const result = await call(user, statement);
+        expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+        return (
+          result.structuredContent as { filas: Record<string, unknown>[] }
+        ).filas;
+      }
+
+      const sources = [
+        ["accounts", "id", "TRUE"],
+        ["transactions", "id", "deleted_at IS NULL"],
+        ["postings", "id", "TRUE"],
+        ["tags", "id", "TRUE"],
+        ["transaction_tags", "tag_id", "TRUE"],
+        ["exchange_rates", "source", "TRUE"],
+        ["custom_field_definitions", "id", "archived_at IS NULL"],
+        ["loans", "id", "TRUE"],
+      ] as const;
+
+      beforeAll(async () => {
+        reader = createDatabase({
+          ...localDatabase("READONLY_DATABASE_URL"),
+          database: readonlySchema,
+          connectionLimit: 2,
+        });
+        await Promise.all(
+          [aId, bId].map(async (id, index) => {
+            const [client, server] = InMemoryTransport.createLinkedPair();
+            await Promise.all([
+              createMcp(
+                "m023b",
+                db,
+                {
+                  pool: reader.pool,
+                  mainSchema: schema,
+                  schema: readonlySchema,
+                },
+                id,
+              ).connect(server),
+              clients[index].connect(client),
+            ]);
+          }),
+        );
+      });
+      afterAll(async () => {
+        await Promise.all(clients.map((client) => client.close()));
+        await reader?.db.destroy();
+      });
+
+      test("S1: ambas identidades ven exactamente sus filas en las ocho vistas", async () => {
+        for (const [table, key, filter] of sources) {
+          const view = "v_" + table;
+          for (const [user, id] of [aId, bId].entries()) {
+            const shared =
+              table === "exchange_rates" ? sql`OR user_id IS NULL` : sql``;
+            const expected = await sql<Record<string, unknown>>`
+              SELECT ${sql.ref(key)} FROM ${sql.table(table)}
+              WHERE (user_id = ${id} ${shared}) AND ${sql.raw(filter)}
+            `.execute(db);
+            expect(expected.rows.length, view).toBeGreaterThan(0);
+            const actual = await rows(user, "SELECT * FROM " + view);
+            expect(actual.map((row) => row[key]).sort(), view).toEqual(
+              expected.rows.map((row) => row[key]).sort(),
+            );
+            for (const row of actual) expect(row).not.toHaveProperty("user_id");
+            expect(
+              await rows(user, "SELECT COUNT(*) AS total FROM " + view),
+            ).toEqual([{ total: String(expected.rows.length) }]);
+          }
+        }
+      });
+
+      test("S2: veinte consultas intercaladas aíslan filas y agregados", async () => {
+        await Promise.all(
+          Array.from({ length: 20 }, async (_, index) => {
+            const user = index % 2;
+            const result = await rows(
+              user,
+              "WITH movimientos AS (SELECT description FROM v_transactions) " +
+                "SELECT MAX(description) AS descripcion, COUNT(*) AS total FROM movimientos",
+            );
+            expect(result).toEqual([
+              {
+                descripcion: user === 0 ? "privado_a" : "privado_b",
+                total: "2",
+              },
+            ]);
+          }),
+        );
+      });
+
+      test("S3: las ocho vistas devuelven cero filas sin mapeo", async () => {
+        for (const [table] of sources) {
+          const [result] = await reader.pool
+            .promise()
+            .query<RowDataPacket[]>("SELECT * FROM v_" + table);
+          expect(result).toEqual([]);
+        }
+      });
+
+      test("S3: un mapeo vencido queda inactivo aunque la conexión siga abierta", async () => {
+        const connection = await reader.pool.promise().getConnection();
+        const lock = randomUUID();
+        try {
+          await connection.execute("SELECT GET_LOCK(?, 0)", [lock]);
+          await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
+            VALUES (${connection.threadId}, ${aId}, ${lock}, UTC_TIMESTAMP(3) - INTERVAL 1 SECOND)`.execute(
+            db,
+          );
+          const [result] = await connection.query("SELECT * FROM v_accounts");
+          expect(result).toEqual([]);
+        } finally {
+          connection.destroy();
+          await sql`DELETE FROM readonly_sql_sessions WHERE lock_name = ${lock}`.execute(
+            db,
+          );
+        }
+      });
+
+      test("S3: una instalación de vistas incompleta deja la herramienta cerrada", async () => {
+        await sql`DELETE FROM readonly_sql_schema WHERE name = ${readonlySchema}`.execute(
+          db,
+        );
+        try {
+          const result = await call(0, "SELECT name FROM v_accounts");
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toBeUndefined();
+        } finally {
+          await sql`INSERT INTO readonly_sql_schema (name) VALUES (${readonlySchema})`.execute(
+            db,
+          );
+        }
+      });
+
+      test("S4: el validador rechaza entradas no permitidas y el lector carece de permisos sobre las tablas", async () => {
+        for (const statement of [
+          "SELECT @x := 1",
+          "SELECT @@version",
+          "SET @x = 1",
+          "SELECT 1 INTO OUTFILE 'm023b.txt'",
+          "SELECT 1 INTO @x",
+          "SELECT * FROM readonly_sql_sessions",
+          `SELECT * FROM \`${schema}\` . \`accounts\``,
+          `SELECT * FROM ${readonlySchema}.v_accounts`,
+          `SELECT * FROM v_accounts UNION SELECT * FROM ${schema}.accounts`,
+          "SELECT * FROM information_schema.PROCESSLIST",
+          "SELECT * FROM information_schema.TABLES",
+          "SELECT * FROM \`INFORMATION_SCHEMA\` . \`PROCESSLIST\`",
+          "SELECT * FROM \`Information_Schema\` . \`TABLES\`",
+          "SELECT 1 AS \`MYSQL\`",
+          "SELECT 1 AS \`performance_schema\`",
+          "SELECT 1 AS \`sys\`",
+          "WITH t AS (SELECT * FROM information_schema.TABLES) SELECT * FROM t",
+          "SELECT * FROM v_accounts JOIN readonly_sql_sessions ON 1 = 1",
+          "SELECT * FROM v_accounts, readonly_sql_sessions",
+          "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 2) SELECT n FROM r",
+          "SELECT 1 /*! + 2 */",
+          "SELECT 1; SELECT 2",
+        ]) {
+          const result = await call(0, statement);
+          const content = JSON.stringify(result.content);
+          expect(result.isError, statement).toBe(true);
+          expect(content).toMatch(
+            /vistas autorizadas|solo lectura|comentarios ejecutables/i,
+          );
+          expect(content).not.toContain(schema);
+          expect(content).not.toContain("privado_b");
+        }
+        expect(
+          await rows(
+            0,
+            "WITH t AS (SELECT id FROM v_transactions) " +
+              "SELECT COUNT(*) AS total FROM t JOIN (SELECT id FROM v_transactions) AS own USING (id)",
+          ),
+        ).toEqual([{ total: "2" }]);
+        for (const table of ["accounts", "readonly_sql_sessions"])
+          await expect(
+            reader.pool.promise().query(`SELECT * FROM ${schema}.${table}`),
+          ).rejects.toMatchObject({ code: "ER_TABLEACCESS_DENIED_ERROR" });
+      });
+
+      test("S5: un timeout borra el mapeo y la siguiente consulta pertenece a B", async () => {
+        const pending = call(0, "SELECT SLEEP(10) FROM v_transactions");
+        const active = async () =>
+          (await sql`SELECT user_id FROM readonly_sql_sessions`.execute(db))
+            .rows;
+        await expect.poll(active).toEqual([{ user_id: aId }]);
+        const metadata = await call(
+          1,
+          "SELECT * FROM information_schema.PROCESSLIST",
+        );
+        expect(metadata.isError).toBe(true);
+        expect(JSON.stringify(metadata.content)).not.toContain("SLEEP");
+        const result = await pending;
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("5 segundos");
+        expect(await active()).toEqual([]);
+        expect(
+          await rows(
+            1,
+            "SELECT description FROM v_transactions WHERE id = " + b.entry.id,
+          ),
+        ).toEqual([{ description: "privado_b" }]);
+      }, 10_000);
+    });
 
     async function newUser() {
       const { insertId } = await sql`INSERT INTO users () VALUES ()`.execute(

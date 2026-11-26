@@ -53,6 +53,8 @@ const tables = [
   "oauth_tokens",
   "operations",
   "postings",
+  "readonly_sql_schema",
+  "readonly_sql_sessions",
   "tags",
   "transaction_tags",
   "transactions",
@@ -730,69 +732,92 @@ test("S7: the reader can select only from the views and cannot write or create",
     );
 });
 
-test("S8: soft-deleted transactions and their postings disappear from the views", async () => {
-  await app.execute(
-    "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', 1)",
-    [transaction, reportingAccount],
-  );
+async function withReaderScope<T>(run: () => Promise<T>) {
+  const lock = randomUUID();
+  await reader.execute("SELECT GET_LOCK(?, 0)", [lock]);
   try {
-    const transactions = () =>
-      reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
-        transaction,
+    await app.execute(
+      "INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at) VALUES (?, 1, ?, UTC_TIMESTAMP(3) + INTERVAL 10 SECOND)",
+      [reader.threadId, lock],
+    );
+    return await run();
+  } finally {
+    try {
+      await app.execute(
+        "DELETE FROM readonly_sql_sessions WHERE connection_id = ? AND lock_name = ?",
+        [reader.threadId, lock],
+      );
+    } finally {
+      await reader.execute("SELECT RELEASE_LOCK(?)", [lock]);
+    }
+  }
+}
+
+test("S8: soft-deleted transactions and their postings disappear from the views", () =>
+  withReaderScope(async () => {
+    await app.execute(
+      "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', 1)",
+      [transaction, reportingAccount],
+    );
+    try {
+      const transactions = () =>
+        reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
+          transaction,
+        ]);
+      const postings = () =>
+        reader.execute(
+          "SELECT account_name, currency FROM v_postings WHERE transaction_id = ?",
+          [transaction],
+        );
+      expect((await transactions())[0]).toHaveLength(1);
+      expect((await postings())[0]).toEqual([
+        { account_name: "Saldos iniciales", currency: "BOB" },
       ]);
-    const postings = () =>
-      reader.execute(
-        "SELECT account_name, currency FROM v_postings WHERE transaction_id = ?",
+      await app.execute(
+        "UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
         [transaction],
       );
-    expect((await transactions())[0]).toHaveLength(1);
-    expect((await postings())[0]).toEqual([
-      { account_name: "Saldos iniciales", currency: "BOB" },
-    ]);
-    await app.execute(
-      "UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [transaction],
-    );
-    expect((await transactions())[0]).toEqual([]);
-    expect((await postings())[0]).toEqual([]);
-  } finally {
-    await app.execute(
-      "UPDATE transactions SET deleted_at = NULL WHERE id = ?",
-      [transaction],
-    );
-    await app.execute("DELETE FROM postings WHERE transaction_id = ?", [
-      transaction,
-    ]);
-  }
-});
-
-test("S9: only active custom definitions are visible and raw JSON and audit are private", async () => {
-  const archived = `archived_${uuid}`;
-  await app.execute(
-    "INSERT INTO custom_field_definitions (user_id, entity, `key`, label, type, archived_at) VALUES (1, 'transaction', ?, 'Activa', 'text', NULL), (1, 'transaction', ?, 'Archivada', 'text', CURRENT_TIMESTAMP)",
-    [uuid, archived],
-  );
-  try {
-    const [definitions] = await reader.execute(
-      "SELECT `key` FROM v_custom_field_definitions WHERE `key` IN (?, ?)",
-      [uuid, archived],
-    );
-    expect(definitions).toEqual([{ key: uuid }]);
-    for (const view of ["v_transactions", "v_accounts"]) {
-      const [, columns] = await reader.query(`SELECT * FROM ${view} LIMIT 0`);
-      expect(columns.map((column) => column.name)).not.toContain("custom");
-    }
-    for (const name of ["audit_log", "v_audit_log"])
-      await expect(reader.query(`SELECT * FROM ${name}`)).rejects.toMatchObject(
-        { code: "ER_NO_SUCH_TABLE" },
+      expect((await transactions())[0]).toEqual([]);
+      expect((await postings())[0]).toEqual([]);
+    } finally {
+      await app.execute(
+        "UPDATE transactions SET deleted_at = NULL WHERE id = ?",
+        [transaction],
       );
-  } finally {
+      await app.execute("DELETE FROM postings WHERE transaction_id = ?", [
+        transaction,
+      ]);
+    }
+  }));
+
+test("S9: only active custom definitions are visible and raw JSON and audit are private", () =>
+  withReaderScope(async () => {
+    const archived = `archived_${uuid}`;
     await app.execute(
-      "DELETE FROM custom_field_definitions WHERE `key` IN (?, ?)",
+      "INSERT INTO custom_field_definitions (user_id, entity, `key`, label, type, archived_at) VALUES (1, 'transaction', ?, 'Activa', 'text', NULL), (1, 'transaction', ?, 'Archivada', 'text', CURRENT_TIMESTAMP)",
       [uuid, archived],
     );
-  }
-});
+    try {
+      const [definitions] = await reader.execute(
+        "SELECT `key` FROM v_custom_field_definitions WHERE `key` IN (?, ?)",
+        [uuid, archived],
+      );
+      expect(definitions).toEqual([{ key: uuid }]);
+      for (const view of ["v_transactions", "v_accounts"]) {
+        const [, columns] = await reader.query(`SELECT * FROM ${view} LIMIT 0`);
+        expect(columns.map((column) => column.name)).not.toContain("custom");
+      }
+      for (const name of ["audit_log", "v_audit_log"])
+        await expect(
+          reader.query(`SELECT * FROM ${name}`),
+        ).rejects.toMatchObject({ code: "ER_NO_SUCH_TABLE" });
+    } finally {
+      await app.execute(
+        "DELETE FROM custom_field_definitions WHERE `key` IN (?, ?)",
+        [uuid, archived],
+      );
+    }
+  }));
 
 test("S10: the app cannot create or drop tables or access the reader schema", async () => {
   for (const statement of [
@@ -1053,29 +1078,31 @@ test("S18: reporting shows archived accounts, posting details and active transac
     [transaction],
   );
   try {
-    const [accounts] = await reader.execute(
-      "SELECT CAST(archived_at AS CHAR) AS archived_at FROM v_accounts WHERE id = ?",
-      [reportingAccount],
-    );
-    expect(accounts).toEqual([{ archived_at: "2026-11-24 00:00:00.123" }]);
-    const [postings] = await reader.execute(
-      "SELECT account_kind, CAST(transaction_date AS CHAR) AS transaction_date FROM v_postings WHERE transaction_id = ?",
-      [transaction],
-    );
-    expect(postings).toEqual([
-      { account_kind: "equity", transaction_date: "2026-11-24" },
-    ]);
-    const tags = () =>
-      reader.execute(
-        "SELECT * FROM v_transaction_tags WHERE transaction_id = ?",
+    await withReaderScope(async () => {
+      const [accounts] = await reader.execute(
+        "SELECT CAST(archived_at AS CHAR) AS archived_at FROM v_accounts WHERE id = ?",
+        [reportingAccount],
+      );
+      expect(accounts).toEqual([{ archived_at: "2026-11-24 00:00:00.123" }]);
+      const [postings] = await reader.execute(
+        "SELECT account_kind, CAST(transaction_date AS CHAR) AS transaction_date FROM v_postings WHERE transaction_id = ?",
         [transaction],
       );
-    expect((await tags())[0]).toHaveLength(1);
-    await app.execute(
-      "UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
-      [transaction],
-    );
-    expect((await tags())[0]).toEqual([]);
+      expect(postings).toEqual([
+        { account_kind: "equity", transaction_date: "2026-11-24" },
+      ]);
+      const tags = () =>
+        reader.execute(
+          "SELECT * FROM v_transaction_tags WHERE transaction_id = ?",
+          [transaction],
+        );
+      expect((await tags())[0]).toHaveLength(1);
+      await app.execute(
+        "UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [transaction],
+      );
+      expect((await tags())[0]).toEqual([]);
+    });
   } finally {
     await migration.execute(
       "UPDATE accounts SET archived_at = NULL WHERE id = ?",
@@ -1278,9 +1305,11 @@ SH
       expect(await readonlyDefinitions()).toEqual(beforeViews);
       expect(
         (
-          await reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
-            transaction,
-          ])
+          await withReaderScope(() =>
+            reader.execute("SELECT id FROM v_transactions WHERE id = ?", [
+              transaction,
+            ]),
+          )
         )[0],
       ).toHaveLength(1);
       expect(
@@ -1335,5 +1364,5 @@ ledgerSpecs(() => ({ migration, reader }));
 googleSpecs(schema, readOnlySchema);
 authSpecs(() => ({ app, reader }));
 mcpSpecs(() => migration, schema, readOnlySchema);
-multiuserSpecs(schema);
+multiuserSpecs(schema, readOnlySchema);
 dashboardSpecs(schema);

@@ -9,6 +9,7 @@ import type { readConfig } from "./config.js";
 import { dashboardApi, dashboardHeaders } from "./dashboard-http.js";
 import { checkDatabase, createDatabase } from "./database.js";
 import { createMcp } from "./mcp/index.js";
+import { clearReadonlySessions } from "./mcp/readonly-sql.js";
 
 type Config = ReturnType<typeof readConfig>;
 
@@ -18,12 +19,28 @@ function setDashboardHeaders(response: ServerResponse) {
 }
 
 export function createApp(
-  { auth, database, webDistDir, version }: Config,
+  { auth, database, readonlyDatabase, webDistDir, version }: Config,
   release?: string,
   connection = database && createDatabase(database),
 ) {
   const app = express();
   const pool = connection?.pool;
+  const readonly =
+    connection?.schema && readonlyDatabase?.database
+      ? {
+          pool: createDatabase({
+            ...readonlyDatabase,
+            connectionLimit: 2,
+            multipleStatements: false,
+          }).pool,
+          mainSchema: connection.schema,
+          schema: readonlyDatabase.database,
+        }
+      : undefined;
+  if (readonly && connection)
+    void clearReadonlySessions(connection.db).catch(() => {
+      console.error("No se pudieron limpiar las sesiones SQL de solo lectura.");
+    });
   const requireAuth = installAuth(app, auth, connection?.db);
   let probe: ReturnType<typeof checkDatabase> | undefined;
   let expiresAt = Infinity;
@@ -60,8 +77,7 @@ export function createApp(
       ))
     )
       return;
-    // shortcut: las vistas todavía son compartidas, conectar el lector al completar M-023.
-    const server = createMcp(version, connection.db, undefined, userId);
+    const server = createMcp(version, connection.db, readonly, userId);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

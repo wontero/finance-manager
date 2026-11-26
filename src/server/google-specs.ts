@@ -272,14 +272,21 @@ export function googleSpecs(schema: string, readonlySchema: string) {
       );
       const reader = new URL(process.env.READONLY_DATABASE_URL!);
       reader.pathname = readonlySchema;
-      const blocked = await rpc(
-        ta.access_token,
-        "consulta_sql",
-        { sql: "SELECT name FROM v_accounts" },
-        client({ READONLY_DATABASE_URL: reader.href }),
-      ).expect(200);
-      expect(blocked.body.result).toMatchObject({ isError: true });
-      expect(blocked.text).not.toContain("Caja privada M022 B");
+      const sqlClient = client({ READONLY_DATABASE_URL: reader.href });
+      for (const [token, own, other] of [
+        [ta.access_token, "A", "B"],
+        [tb.access_token, "B", "A"],
+      ]) {
+        const result = await rpc(
+          token,
+          "consulta_sql",
+          { sql: "SELECT name FROM v_accounts" },
+          sqlClient,
+        ).expect(200);
+        expect(result.body.result.isError).not.toBe(true);
+        expect(result.text).toContain("Caja privada M022 " + own);
+        expect(result.text).not.toContain("Caja privada M022 " + other);
+      }
       const next = (
         await token(id, {
           grant_type: "refresh_token",

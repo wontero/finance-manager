@@ -109,7 +109,7 @@ npm run dev
 - `npm run build` genera `dist/` en cada workspace. Ejecuta `node app.js` para servir el build de la web, `/health` y `/mcp` desde el mismo proceso.
 - `npm run migrate`, después de compilar, aplica migraciones sobre `MIGRATION_DATABASE_URL` y actualiza las vistas de `READONLY_DATABASE_NAME`. Con el `.env` de ejemplo apunta a `finance_dev` y `finance_dev_ro`.
 - `/mcp` exige un token OAuth con ámbito `finance`. Configura `PUBLIC_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `FIRST_USER_EMAIL`. Aplica la migración y vuelve a conectar Claude. El primer inicio de sesión con el correo configurado vincula los datos existentes. [Configuración de Google Cloud](docs/operacion/despliegue.md#cliente-oauth-en-google-cloud)
-- Desde Claude puedes registrar gastos, importar capturas en lotes reversibles y consultar saldos, movimientos o patrimonio. El acceso a `consulta_sql` queda pendiente hasta que las vistas filtren por usuario (M-023).
+- Desde Claude puedes registrar gastos, importar capturas en lotes reversibles y consultar saldos, movimientos o patrimonio. Con `consulta_sql` puedes consultar tus datos y los tipos de cambio oficiales.
 - El registro admite hasta 50 usuarios por defecto. Usa `MAX_USERS=0` para cerrar nuevas altas. `MAX_REQUESTS_PER_USER_PER_MINUTE` limita a 120 las peticiones autenticadas por usuario y minuto entre `/mcp` y `/api`.
 - `npm run auth:tokens -- list <usuario>` lista los identificadores activos de ese usuario. `npm run auth:tokens -- revoke <usuario> <token>` revoca una familia.
 
