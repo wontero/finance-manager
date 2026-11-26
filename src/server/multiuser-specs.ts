@@ -468,6 +468,12 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
             arguments: {},
           });
           expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+          expect(result.content).toEqual([
+            {
+              type: "text",
+              text: `${(result.structuredContent as { guia: string }).guia}\n\n${JSON.stringify(result.structuredContent)}`,
+            },
+          ]);
           return result.structuredContent as {
             tiene_movimientos: boolean;
             cuentas_propias: number;
