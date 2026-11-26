@@ -70,6 +70,7 @@ flowchart LR
 Abre la raíz del sitio e inicia sesión con la contraseña creada mediante `npm run auth:setup`. El dashboard usa solo contraseña por decisión de Mateo. Claude conserva el flujo OAuth con TOTP.
 
 - **Resumen** muestra patrimonio, efectivo y cuentas de subtipo banco, ingresos y gastos frente al mes anterior, principales categorías y los últimos movimientos del mes elegido. El disponible se conserva por moneda. Las categorías se ordenan por su valor conocido en Bs al cierre. Si falta una cotización para un saldo, el patrimonio se muestra como parcial.
+- **Cuentas** muestra saldos de activos y pasivos por moneda, permite incluir archivadas y abrir sus movimientos.
 - **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
 - **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
 

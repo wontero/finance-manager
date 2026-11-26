@@ -65,7 +65,12 @@ function MovementDetail({
 }
 
 export function Transactions({ api }: { api: Api }) {
-  const [filters, setFilters] = useState("");
+  const [account, setAccount] = useState(
+    () => new URLSearchParams(location.search).get("cuenta") ?? "",
+  );
+  const [filters, setFilters] = useState(() =>
+    account ? new URLSearchParams({ account }).toString() : "",
+  );
   const [selected, select] = useState<DashboardTransaction>();
   const accounts = useResource<DashboardAccounts>(api, "/accounts");
   const page = usePage<DashboardTransaction, DashboardMovements>(
@@ -98,7 +103,10 @@ export function Transactions({ api }: { api: Api }) {
       <form
         className="panel filters"
         onSubmit={apply}
-        onReset={() => setFilters("")}
+        onReset={() => {
+          setFilters("");
+          setAccount("");
+        }}
       >
         <label className="search">
           Buscar
@@ -119,7 +127,11 @@ export function Transactions({ api }: { api: Api }) {
         </label>
         <label>
           Cuenta
-          <select name="account">
+          <select
+            name="account"
+            value={account}
+            onChange={(event) => setAccount(event.target.value)}
+          >
             <option value="">Todas</option>
             {accounts.data?.accounts
               .filter(({ kind }) => kind === "asset" || kind === "liability")

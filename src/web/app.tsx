@@ -9,6 +9,7 @@ import {
   type MouseEvent,
 } from "react";
 import { Activity } from "./activity";
+import { Accounts } from "./accounts";
 import { errorText, type Api } from "./api";
 import { Button } from "./components/ui/button";
 import { Alert, Loading } from "./dashboard-ui";
@@ -26,6 +27,13 @@ const pages = [
     title: "Resumen",
     icon: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
     Screen: Summary,
+  },
+  {
+    path: "/cuentas",
+    label: "Cuentas",
+    title: "Cuentas",
+    icon: "M3 6h18v13H3zM3 9h18M16 15h2",
+    Screen: Accounts,
   },
   {
     path: "/movimientos",

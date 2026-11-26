@@ -357,6 +357,21 @@ td small,
 .line dd {
   text-align: right;
 }
+.account-row:hover {
+  background: var(--surface-2);
+}
+.account-row {
+  padding: 10px;
+  margin: 0 -10px;
+}
+.account-row.archived {
+  opacity: 0.65;
+}
+.account-toggle input {
+  min-height: 0;
+  width: 18px;
+  height: 18px;
+}
 .hint,
 .loading {
   color: var(--muted);
@@ -655,7 +670,7 @@ th:first-child {
     display: none;
   }
   nav {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 2px;
     margin: 0;
   }
