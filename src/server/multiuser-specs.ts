@@ -266,6 +266,55 @@ export function multiuserSpecs(schema: string) {
             sourceId: a.category,
             targetId: b.category,
           }),
+        () =>
+          b.ledger.mergeCategories({
+            sourceId: b.category,
+            targetId: a.category,
+          }),
+        () =>
+          b.ledger.editTransaction({
+            id: b.entry.id,
+            lines: [
+              {
+                accountId: a.cash,
+                side: "credit",
+                currency: "BOB",
+                amount: "12",
+              },
+              {
+                accountId: b.category,
+                side: "debit",
+                currency: "BOB",
+                amount: "12",
+              },
+            ],
+          }),
+        () =>
+          b.ledger.transfer({
+            fromAccountId: b.cash,
+            toAccountId: a.cash,
+            amount: "1",
+            description: "intruso",
+            date,
+          }),
+        () =>
+          b.ledger.registerLoan({
+            direction: "given",
+            counterparty: "intruso",
+            amount: "1",
+            currency: "BOB",
+            date,
+            rate: "0",
+            ratePeriod: "annual",
+            accountId: a.cash,
+          }),
+        () =>
+          b.ledger.payLoan({
+            id: b.loan.id,
+            accountId: a.cash,
+            amount: "1",
+            date,
+          }),
         () => b.ledger.archiveCustomField({ id: a.definition.id }),
         () =>
           b.ledger.recordExpense({
@@ -300,10 +349,18 @@ export function multiuserSpecs(schema: string) {
             { duplicates: "skip" },
           ),
       ];
-      const before = await a.ledger.listOperations();
+      const before = await Promise.all([
+        a.ledger.listOperations(),
+        b.ledger.listOperations(),
+      ]);
       for (const operation of operations)
         await expect(operation()).rejects.toThrow(missing);
-      expect(await a.ledger.listOperations()).toEqual(before);
+      expect(
+        await Promise.all([
+          a.ledger.listOperations(),
+          b.ledger.listOperations(),
+        ]),
+      ).toEqual(before);
       const [tag] = await a.ledger.listMetadata({
         entity: "etiqueta",
         includeArchived: false,
@@ -326,6 +383,53 @@ export function multiuserSpecs(schema: string) {
         await expect(statement.execute(db)).rejects.toMatchObject({
           code: "ER_NO_REFERENCED_ROW_2",
         });
+    });
+
+    test("M-021B S3: MCP rechaza IDs ajenos igual que los inexistentes", async () => {
+      const server = createMcp("m021b", db, undefined, bId);
+      const sdk = new Client({ name: "m021b", version: "1" });
+      const [clientTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair();
+      const before = await b.ledger.listOperations();
+      try {
+        await Promise.all([
+          server.connect(serverTransport),
+          sdk.connect(clientTransport),
+        ]);
+        const absentId = "999999999";
+        for (const [name, args, key, foreignId] of [
+          [
+            "modificar_cuenta",
+            { cuenta: b.cash, accion: "mover" },
+            "padre",
+            a.cash,
+          ],
+          [
+            "abonar_prestamo",
+            { cuenta: b.cash, monto: "1", fecha: date },
+            "id",
+            a.loan.id,
+          ],
+        ] as const) {
+          const call = (id: string) =>
+            sdk.callTool({ name, arguments: { ...args, [key]: id } });
+          const result = await call(foreignId);
+          const absent = await call(absentId);
+          expect(result.isError, name).toBe(true);
+          expect(result.structuredContent, name).toBeUndefined();
+          expect(JSON.stringify(result.content)).toMatch(
+            /no existe|no se encontr/i,
+          );
+          expect(JSON.stringify(result.content)).not.toContain("privado_a");
+          expect(JSON.stringify(result.content)).toBe(
+            JSON.stringify(absent.content).replaceAll(absentId, foreignId),
+          );
+        }
+        expect(await b.ledger.listOperations()).toEqual(before);
+      } finally {
+        await sdk.close();
+        await server.close();
+      }
     });
 
     test("S4: cada usuario tiene su propia etiqueta, categoría y definición con el mismo nombre", async () => {
@@ -406,7 +510,7 @@ export function multiuserSpecs(schema: string) {
       expect(await ledger.getAccountTree(true)).toEqual(before);
     });
 
-    test("S6: el tipo del usuario tiene prioridad y el oficial se comparte", async () => {
+    test("M-021 S6 / M-021B S1: usa el tipo más reciente y el propio gana el empate", async () => {
       const when = "1997-10-01";
       const pair = { from: "USD", to: "BOB", date: when };
       const official = await a.ledger.recordOfficialRate({
@@ -460,8 +564,28 @@ export function multiuserSpecs(schema: string) {
       expect(await a.ledger.getExchangeRate(next)).toMatchObject({
         rate: "9.0000000000",
       });
-      expect(await b.ledger.getExchangeRate(next)).toMatchObject({
+      const later = { ...pair, date: "1997-10-03" };
+      expect(await b.ledger.getExchangeRate(later)).toMatchObject({
+        rate: "9.0000000000",
+      });
+      expect(await b.ledger.getExchangeRate(pair)).toMatchObject({
         rate: "8.0000000000",
+      });
+      await b.ledger.recordExchangeRate({
+        ...next,
+        rate: "10",
+        source: "A manual",
+      });
+      await b.ledger.recordExchangeRate({
+        ...next,
+        rate: "11",
+        source: "BCB referencial venta",
+      });
+      expect(await b.ledger.getExchangeRate(next)).toMatchObject({
+        rate: "11.0000000000",
+      });
+      expect(await a.ledger.getExchangeRate(next)).toMatchObject({
+        rate: "9.0000000000",
       });
     });
 

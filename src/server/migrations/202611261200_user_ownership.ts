@@ -1,4 +1,5 @@
 import { sql, type Kysely } from "kysely";
+import { cucuSourcePrefix } from "../ledger/schema.js";
 
 export async function up(db: Kysely<unknown>) {
   await sql`CREATE TABLE IF NOT EXISTS users (
@@ -125,4 +126,19 @@ export async function up(db: Kysely<unknown>) {
   await sql`ALTER TABLE exchange_rates ALTER COLUMN user_id SET DEFAULT NULL`.execute(
     db,
   );
+  const source = `${cucuSourcePrefix}%`;
+  await db.transaction().execute(async (trx) => {
+    await sql`DELETE legacy FROM exchange_rates AS legacy
+      INNER JOIN exchange_rates AS preferred
+        ON preferred.from_currency = legacy.from_currency
+        AND preferred.to_currency = legacy.to_currency
+        AND preferred.date = legacy.date
+        AND (preferred.user_id IS NULL OR
+          (preferred.id < legacy.id AND BINARY preferred.source LIKE ${source}))
+      WHERE legacy.user_id IS NOT NULL AND BINARY legacy.source LIKE ${source}`.execute(
+      trx,
+    );
+    await sql`UPDATE exchange_rates SET user_id = NULL
+      WHERE user_id IS NOT NULL AND BINARY source LIKE ${source}`.execute(trx);
+  });
 }

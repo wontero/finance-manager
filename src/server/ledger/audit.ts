@@ -10,6 +10,7 @@ import {
 } from "kysely";
 import { archivedAccountWithBalance, getAccountTotal } from "./queries.js";
 import {
+  cucuSourcePrefix,
   systemAccounts,
   type Actor,
   type ExchangeRate,
@@ -68,10 +69,11 @@ function rowId<T extends Table>(table: T, row: Key<T>) {
 function snapshot(row: object) {
   const values = { ...row } as Snapshot;
   delete values.active_parent_id;
-  delete values.user_id;
+  // Las cotizaciones nuevas conservan el dueño para distinguirlas de las históricas.
+  if ("from_currency" in values) delete values.id;
+  else delete values.user_id;
   delete values.owner_key;
   delete values.owner_source;
-  if ("from_currency" in values) delete values.id;
   return values;
 }
 
@@ -664,11 +666,18 @@ export class LedgerWrite {
       const table = item.table_name as Table;
       const before = parseSnapshot(item.before);
       const after = parseSnapshot(item.after);
-      if (table === "exchange_rates" && after?.user_id === null)
+      const state = after ?? before;
+      if (
+        table === "exchange_rates" &&
+        (state?.user_id === null ||
+          (state?.user_id === undefined &&
+            typeof state?.source === "string" &&
+            state.source.startsWith(cucuSourcePrefix)))
+      )
         throw new UndoConflict(
           "El tipo de cambio oficial compartido no se puede deshacer.",
         );
-      const key = (after ?? before) as Key<Table>;
+      const key = state as Key<Table>;
       if (!key || rowId(table, key) !== item.row_id)
         throw new UndoConflict(
           `La bitácora tiene una clave inválida en ${table}/${item.row_id}.`,

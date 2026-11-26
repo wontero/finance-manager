@@ -116,6 +116,8 @@ export type ExchangeRate = Omit<
 >;
 export type Loan = Selectable<LedgerDatabase["loans"]>;
 
+export const cucuSourcePrefix = "Tipo de cambio oficial BCB vía apibcb.cucu.bo";
+
 export const systemAccounts = {
   income: "Ingresos",
   expense: "Gastos",

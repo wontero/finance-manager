@@ -14,7 +14,7 @@ All notable changes to FinanceManager are documented here. The format follows [K
 ### Cambiado
 
 - Las instrucciones del servidor MCP piden respuestas breves y resultados finales sin cálculos intermedios.
-- El tipo oficial USD/BOB se comparte y sirve de respaldo cuando el usuario no tiene un tipo propio aplicable.
+- Los tipos oficiales USD/BOB de CUCU se comparten, incluidas las cotizaciones históricas. La valuación usa el tipo más reciente hasta la fecha solicitada y, en caso de empate, prefiere el del usuario.
 
 ### Corregido
 

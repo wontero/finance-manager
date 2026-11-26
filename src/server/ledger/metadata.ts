@@ -115,10 +115,10 @@ export async function findExchangeRate(
   to: string,
   date: string,
 ) {
-  return (
-    (await findUserRate(db, from, to, date)) ??
-    findOfficialRate(db, from, to, date)
-  );
+  const own = await findUserRate(db, from, to, date);
+  if (own?.date === date) return own;
+  const official = await findOfficialRate(db, from, to, date);
+  return official && (!own || official.date > own.date) ? official : own;
 }
 
 async function validateRate(

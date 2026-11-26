@@ -15,6 +15,7 @@ import { afterAll, beforeAll, expect, test } from "vitest";
 import { dashboardSpecs } from "./dashboard-specs.js";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
+import { UndoConflict } from "./ledger/audit.js";
 import { createLedger } from "./ledger/index.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
 import { getAccountTotal, getOperations } from "./ledger/queries.js";
@@ -336,7 +337,9 @@ beforeAll(async () => {
   transaction = rows[0].id;
 }, 20_000);
 
-test("M-021 S1: migración reintentable conserva filas, saldos, informes y auditoría reversible", async () => {
+async function withLegacyData(
+  run: (db: ReturnType<typeof createDatabase>["db"]) => Promise<void>,
+) {
   // Las tablas de esta prueba viven junto a las vistas, separadas de los otros fixtures.
   const { db } = createDatabase({
     ...localDatabase("MIGRATION_DATABASE_URL"),
@@ -346,6 +349,28 @@ test("M-021 S1: migración reintentable conserva filas, saldos, informes y audit
     await accountingMigration.up(db);
     await loanMigration.up(db);
     await seedLegacyData(db);
+    await run(db);
+  } finally {
+    try {
+      await db.connection().execute(async (connection) => {
+        await sql`SET FOREIGN_KEY_CHECKS = 0`.execute(connection);
+        try {
+          const tables = [...Object.keys(legacyTables), "currencies", "users"];
+          await sql`DROP TABLE IF EXISTS ${sql.join(tables.map((table) => sql.table(table)))}`.execute(
+            connection,
+          );
+        } finally {
+          await sql`SET FOREIGN_KEY_CHECKS = 1`.execute(connection);
+        }
+      });
+    } finally {
+      await db.destroy();
+    }
+  }
+}
+
+test("M-021 S1: migración reintentable conserva filas, saldos, informes y auditoría reversible", () =>
+  withLegacyData(async (db) => {
     const before = await domainRows(db);
     const results = await legacyRead(db);
     await ownershipMigration.up(db);
@@ -386,24 +411,88 @@ test("M-021 S1: migración reintentable conserva filas, saldos, informes y audit
         date: legacyDate,
       }),
     ).toMatchObject({ rate: "7.0000000000" });
-  } finally {
-    try {
-      await db.connection().execute(async (connection) => {
-        await sql`SET FOREIGN_KEY_CHECKS = 0`.execute(connection);
-        try {
-          const tables = [...Object.keys(legacyTables), "currencies", "users"];
-          await sql`DROP TABLE IF EXISTS ${sql.join(tables.map((table) => sql.table(table)))}`.execute(
-            connection,
-          );
-        } finally {
-          await sql`SET FOREIGN_KEY_CHECKS = 1`.execute(connection);
-        }
-      });
-    } finally {
-      await db.destroy();
+  }));
+
+test("M-021B S2: comparte y deduplica tipos de CUCU anteriores y actualiza el patrimonio", () =>
+  withLegacyData(async (db) => {
+    const date = "1977-11-12";
+    const next = "1977-11-13";
+    const pair = { from: "USD", to: "BOB" };
+    const prefix = "Tipo de cambio oficial BCB vía apibcb.cucu.bo";
+    const legacyIds = [randomUUID(), randomUUID()];
+    for (const [index, id] of legacyIds.entries()) {
+      const source = `${prefix} (variante ${index})`;
+      const quote = {
+        from_currency: "USD",
+        to_currency: "BOB",
+        date,
+        source,
+        rate: "8.0000000000",
+      };
+      await sql`INSERT INTO operations (id, actor, description) VALUES (${id}, 'claude', 'Registrar tipo de cambio')`.execute(
+        db,
+      );
+      await sql`INSERT INTO exchange_rates (from_currency, to_currency, date, source, rate) VALUES ('USD', 'BOB', ${date}, ${source}, 8)`.execute(
+        db,
+      );
+      await sql`INSERT INTO audit_log (operation_id, table_name, row_id, action, \`after\`) VALUES
+        (${id}, 'exchange_rates', ${`USD/BOB/${date}/${source}`}, 'insert', ${JSON.stringify(quote)})`.execute(
+        db,
+      );
     }
-  }
-});
+    const audit = () =>
+      sql`SELECT operation_id, row_id, \`after\` FROM audit_log ORDER BY id`.execute(
+        db,
+      );
+    const before = (await audit()).rows;
+    await ownershipMigration.up(db);
+    const rates = () =>
+      sql`SELECT user_id, date, source FROM exchange_rates ORDER BY date`.execute(
+        db,
+      );
+    const migrated = (await rates()).rows;
+    expect(migrated).toEqual([
+      { user_id: "1", date: legacyDate, source: "Tipo previo" },
+      { user_id: null, date, source: expect.stringContaining(prefix) },
+    ]);
+    await ownershipMigration.up(db);
+    expect((await rates()).rows).toEqual(migrated);
+    expect((await audit()).rows).toEqual(before);
+
+    const ledger = createLedger(db, "web", "1");
+    const other = createLedger(db, "web", "2");
+    expect(await other.getExchangeRate({ ...pair, date })).toMatchObject({
+      rate: "8.0000000000",
+    });
+    expect((await ledger.getNetWorth({ date: next })).amount).toBe(9241n);
+    const official = await ledger.recordOfficialRate({
+      ...pair,
+      date: next,
+      rate: "9",
+      source: `${prefix} (nuevo)`,
+    });
+    expect((await ledger.getNetWorth({ date: next })).amount).toBe(10464n);
+
+    for (const id of [...legacyIds, official.operationId!]) {
+      await expect(ledger.undoOperation(id)).rejects.toThrow(UndoConflict);
+      await expect(ledger.undoOperation(id)).rejects.toThrow(
+        "El tipo de cambio oficial compartido no se puede deshacer.",
+      );
+    }
+    const manual = await ledger.recordExchangeRate({
+      ...pair,
+      date,
+      rate: "10",
+      source: `${prefix} (variante 0)`,
+    });
+    expect(await ledger.getExchangeRate({ ...pair, date })).toMatchObject({
+      rate: "10.0000000000",
+    });
+    await ledger.undoOperation(manual.operationId);
+    expect(await ledger.getExchangeRate({ ...pair, date })).toMatchObject({
+      rate: "8.0000000000",
+    });
+  }));
 
 afterAll(async () => {
   reader?.release();

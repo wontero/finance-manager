@@ -19,7 +19,7 @@ Claude opera con mucha autonomía (incluida la carga masiva de historial leído 
 - Cada cambio se registra en una bitácora que solo admite inserciones: actor (`claude` / `web`), fecha, valores antes y después, y un **ID de operación** que agrupa todo lo que provocó un mismo pedido (por ejemplo, un lote de 30 movimientos).
 - Los registros no se borran físicamente desde Claude: borrado lógico.
 - "Deshacer operación X" genera los cambios inversos, que también quedan auditados. Devuelve cada fila tocada a su estado anterior (una fila creada por X se elimina; su contenido sigue en la bitácora y deshacer el deshacer la repone) y solo procede si nadie cambió esas filas después; si no, avisa qué operación posterior lo impide.
-- Con el esquema multiusuario, cada operación y entrada de bitácora pertenece a un usuario. Al restaurar una fila se usa ese dueño, incluso con instantáneas anteriores a la migración. El alta de un tipo oficial compartido queda auditada y queda fuera de las reversiones del usuario.
+- Con el esquema multiusuario, cada operación y entrada de bitácora pertenece a un usuario. Al restaurar una fila se usa ese dueño, incluso con instantáneas anteriores a la migración. Las operaciones sobre tipos oficiales compartidos quedan fuera de las reversiones del usuario. Para las cotizaciones nuevas, la instantánea guarda el dueño. Las instantáneas históricas de CUCU se identifican por el prefijo de su fuente y la ausencia de `user_id`.
 
 ## Consecuencias
 
