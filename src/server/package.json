@@ -12,7 +12,6 @@
     "express": "^5.1.0",
     "kysely": "^0.29.9",
     "mysql2": "^3.24.6",
-    "otpauth": "^9.6.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

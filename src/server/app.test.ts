@@ -12,6 +12,11 @@ import * as database from "./database.js";
 
 const version = "m002-test";
 const app = createApp(readConfig({ APP_VERSION: version }));
+const googleCredentials = {
+  GOOGLE_CLIENT_ID: "test-id",
+  GOOGLE_CLIENT_SECRET: "test-secret",
+  FIRST_USER_EMAIL: "owner@example.test",
+};
 
 test("S4: GET and DELETE cannot open an MCP session", async () => {
   await request(app).get("/mcp").expect(405).expect("Allow", "POST");
@@ -37,6 +42,7 @@ test("S5: health hides database errors and responds within three seconds", async
 
   const unavailable = createApp(
     readConfig({
+      ...googleCredentials,
       APP_VERSION: version,
       DATABASE_URL: `mysql://user:secret@127.0.0.1:${address.port}/test`,
     }),
@@ -64,6 +70,7 @@ test("S11: concurrent health requests share a probe and cache it for 10 seconds"
   const health = request(
     createApp(
       readConfig({
+        ...googleCredentials,
         DATABASE_URL: "mysql://user:secret@localhost/test",
       }),
     ),
@@ -126,7 +133,11 @@ test("S14: health times out during acquisition and releases a late connection", 
 test("S12: a Unix socket replaces TCP and must be an absolute path", () => {
   const DATABASE_URL = "mysql://user:secret@localhost:3308/test";
   expect(
-    readConfig({ DATABASE_URL, DATABASE_SOCKET: "/ruta/abs" }).database,
+    readConfig({
+      ...googleCredentials,
+      DATABASE_URL,
+      DATABASE_SOCKET: "/ruta/abs",
+    }).database,
   ).toEqual({
     socketPath: "/ruta/abs",
     user: "user",
@@ -166,13 +177,9 @@ test("M-015B S3: dashboard login uses the HTTP limit and the trusted IP", async 
   const origin = "https://finanzas.example";
   const client = request(createApp(readConfig({ PUBLIC_URL: origin })));
   const login = (ip: string) =>
-    client
-      .post("/api/session")
-      .set("Origin", origin)
-      .set("X-Forwarded-For", ip)
-      .send({ password: "prueba" });
+    client.get("/auth/google/start").set("X-Forwarded-For", ip);
   for (let attempt = 1; attempt <= 20; attempt++)
-    await login(`192.0.2.${attempt}`).expect(401);
+    await login(`192.0.2.${attempt}`).expect(503);
   await login("192.0.2.21")
     .expect(429)
     .expect("RateLimit-Limit", "20")
@@ -206,7 +213,7 @@ test("M-015B S4: the SPA and API prevent framing", async () => {
       expect(response.headers["x-frame-options"]).toBeUndefined();
     }
     await client
-      .get("/authorize/login")
+      .get("/auth/google/start")
       .expect(
         "Content-Security-Policy",
         /^default-src 'none';.*frame-ancestors 'none'$/,
@@ -219,6 +226,12 @@ test("M-015B S4: the SPA and API prevent framing", async () => {
 
 test.each([
   ["PORT", "abc", /PORT debe ser un entero/],
+  ["GOOGLE_CLIENT_ID", "", /GOOGLE_CLIENT_ID/],
+  ["GOOGLE_CLIENT_SECRET", "valor con espacios", /GOOGLE_CLIENT_SECRET/],
+  ["FIRST_USER_EMAIL", "sin-correo", /FIRST_USER_EMAIL/],
+  ["MAX_USERS", "-1", /MAX_USERS/],
+  ["MAX_REQUESTS_PER_USER_PER_MINUTE", "0", /MAX_REQUESTS_PER_USER_PER_MINUTE/],
+  ["GOOGLE_TOKEN_URL", "http://127.0.0.1:1234/token", /GOOGLE_TOKEN_URL/],
   [
     "DATABASE_URL",
     "https://user:secret@localhost",
@@ -231,3 +244,19 @@ test.each([
     expect(() => readConfig({ [name]: value })).not.toThrow(/secret/);
   },
 );
+
+test("M-022: Google config is required with a database and uses the public callback", () => {
+  const DATABASE_URL = "mysql://user:secret@localhost/test";
+  expect(() => readConfig({ DATABASE_URL })).toThrow(
+    /GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET y FIRST_USER_EMAIL/,
+  );
+  const PUBLIC_URL = "https://finanzas.example";
+  const { auth } = readConfig({
+    DATABASE_URL,
+    PUBLIC_URL,
+    ...googleCredentials,
+  });
+  expect(auth.google?.callback.href).toBe(PUBLIC_URL + "/auth/google/callback");
+  expect(auth.google?.maxUsers).toBe(50);
+  expect(auth.requestsPerMinute).toBe(120);
+});

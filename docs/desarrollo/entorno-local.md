@@ -19,6 +19,10 @@ Copy-Item .env.example .env
 
 Completa `.env` con las rutas de la instancia local y claves distintas para `finance_dev`, `finance_migration`, `finance_readonly` y `finance_shutdown`. Conserva el host y puerto local en las URLs. Codifica en porcentaje los caracteres reservados de las contraseñas.
 
+Para iniciar sesión en local, configura las variables de Google del archivo de ejemplo y registra la URI de retorno para tu `PUBLIC_URL`. Puedes usar `http://localhost:3000/auth/google/callback` con el servidor Node iniciado en el puerto predeterminado. Las pruebas de autenticación usan un proveedor local con credenciales ficticias. [Cliente OAuth en Google Cloud](../operacion/despliegue.md#cliente-oauth-en-google-cloud)
+
+Las pruebas pueden reemplazar las URL de autorización y canje con `GOOGLE_AUTHORIZATION_URL` y `GOOGLE_TOKEN_URL`, y el emisor con `GOOGLE_ISSUER`. Solo `NODE_ENV=test` admite HTTP en loopback para esas URL.
+
 Para preparar una instancia nueva, extrae el ZIP de MariaDB fuera del repositorio. Ejecuta lo siguiente una vez, con un directorio de datos nuevo y una clave de administración local. Tras iniciar el servidor en primer plano, abre otra sesión de PowerShell para conectarte como `root`.
 
 ```powershell

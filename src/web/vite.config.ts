@@ -11,6 +11,11 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: { "@": fileURLToPath(new URL(".", import.meta.url)) },
     },
-    server: { proxy: { "/api": "http://127.0.0.1:" + PORT } },
+    server: {
+      proxy: {
+        "/api": "http://127.0.0.1:" + PORT,
+        "/auth/google": "http://127.0.0.1:" + PORT,
+      },
+    },
   };
 });

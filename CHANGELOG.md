@@ -13,6 +13,9 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Cambiado
 
+- Inicio de sesión web y autorización de Claude mediante Google OpenID Connect. Los códigos, tokens y sesiones pertenecen a cada usuario. La migración invalida las credenciales anteriores y requiere reconectar Claude.
+- Registro con cupo configurable y límite compartido de peticiones por usuario en el dashboard y MCP. Las consultas SQL desde MCP quedan pendientes del aislamiento de vistas en M-023.
+
 - Las instrucciones del servidor MCP piden respuestas breves y resultados finales sin cálculos intermedios.
 - Los tipos oficiales USD/BOB de CUCU se comparten, incluidas las cotizaciones históricas. La valuación usa el tipo más reciente hasta la fecha solicitada y, en caso de empate, prefiere el del usuario.
 

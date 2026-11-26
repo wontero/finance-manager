@@ -62,6 +62,25 @@ const redirectSchema = z
     );
   }, "OAUTH_ALLOWED_REDIRECT_URIS debe incluir solo URLs HTTPS exactas");
 
+const googleValue = (name: string) =>
+  z
+    .string()
+    .trim()
+    .regex(
+      /^\S{1,512}$/,
+      `${name} debe tener entre 1 y 512 caracteres sin espacios`,
+    )
+    .optional();
+
+const nonnegativeInteger = (name: string) => {
+  const error = `${name} debe ser un entero no negativo`;
+  return z
+    .string()
+    .regex(/^\d+$/, error)
+    .transform(Number)
+    .pipe(z.number().int(error).nonnegative(error));
+};
+
 const configSchema = z.object({
   NODE_ENV: z.string().optional(),
   PUBLIC_URL: z
@@ -86,16 +105,30 @@ const configSchema = z.object({
       "https://claude.ai/api/mcp/auth_callback",
       "https://claude.com/api/mcp/auth_callback",
     ]),
-  TOTP_ENCRYPTION_KEY: z
+  GOOGLE_CLIENT_ID: googleValue("GOOGLE_CLIENT_ID"),
+  GOOGLE_CLIENT_SECRET: googleValue("GOOGLE_CLIENT_SECRET"),
+  FIRST_USER_EMAIL: z
     .string()
-    .refine(
-      (value) =>
-        /^[A-Za-z0-9+/]{43}=$/.test(value) &&
-        Buffer.from(value, "base64").toString("base64") === value,
-      "TOTP_ENCRYPTION_KEY debe contener 32 bytes en base64",
-    )
-    .transform((value) => Buffer.from(value, "base64"))
+    .trim()
+    .pipe(z.email("FIRST_USER_EMAIL debe ser un correo válido").max(320))
     .optional(),
+  GOOGLE_AUTHORIZATION_URL: z
+    .string()
+    .default("https://accounts.google.com/o/oauth2/v2/auth"),
+  GOOGLE_TOKEN_URL: z.string().default("https://oauth2.googleapis.com/token"),
+  GOOGLE_ISSUER: z
+    .string()
+    .min(1, "GOOGLE_ISSUER debe ser una URL HTTPS válida")
+    .optional(),
+  MAX_USERS: nonnegativeInteger("MAX_USERS").default(50),
+  MAX_REQUESTS_PER_USER_PER_MINUTE: nonnegativeInteger(
+    "MAX_REQUESTS_PER_USER_PER_MINUTE",
+  )
+    .refine(
+      (value) => value > 0 && value < 2 ** 32 - 1,
+      "MAX_REQUESTS_PER_USER_PER_MINUTE debe ser un entero positivo menor que 4294967295",
+    )
+    .default(120),
   TRUST_PROXY: z
     .enum(["passenger", "loopback", "off"], {
       error: "TRUST_PROXY debe ser passenger, loopback u off",
@@ -167,13 +200,64 @@ export function readConfig(env: NodeJS.ProcessEnv) {
   if (
     config.NODE_ENV === "production" &&
     database &&
-    (!config.PUBLIC_URL ||
-      issuer.protocol !== "https:" ||
-      !config.TOTP_ENCRYPTION_KEY)
+    (!config.PUBLIC_URL || issuer.protocol !== "https:")
   ) {
     throw new Error(
-      "Configura PUBLIC_URL con HTTPS y TOTP_ENCRYPTION_KEY para activar la autenticación en producción.",
+      "Configura PUBLIC_URL con HTTPS para activar la autenticación en producción.",
     );
+  }
+  const providerUrl = (name: string, value: string) => {
+    const url = URL.canParse(value) ? new URL(value) : undefined;
+    const localTest =
+      config.NODE_ENV === "test" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url?.hostname ?? "") &&
+      url?.protocol === "http:";
+    if (
+      !url ||
+      (!localTest && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.hash ||
+      url.search
+    )
+      throw new Error(`${name} debe ser una URL HTTPS válida.`);
+    return url;
+  };
+  const authorizationUrl = providerUrl(
+    "GOOGLE_AUTHORIZATION_URL",
+    config.GOOGLE_AUTHORIZATION_URL,
+  );
+  const tokenUrl = providerUrl("GOOGLE_TOKEN_URL", config.GOOGLE_TOKEN_URL);
+  const googleIssuer = config.GOOGLE_ISSUER;
+  if (googleIssuer) providerUrl("GOOGLE_ISSUER", googleIssuer);
+  let google;
+  if (
+    database ||
+    config.GOOGLE_CLIENT_ID ||
+    config.GOOGLE_CLIENT_SECRET ||
+    config.FIRST_USER_EMAIL
+  ) {
+    const {
+      GOOGLE_CLIENT_ID: clientId,
+      GOOGLE_CLIENT_SECRET: clientSecret,
+      FIRST_USER_EMAIL: firstUserEmail,
+    } = config;
+    if (!clientId || !clientSecret || !firstUserEmail)
+      throw new Error(
+        "Configura GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET y FIRST_USER_EMAIL.",
+      );
+    google = {
+      clientId,
+      clientSecret,
+      firstUserEmail: firstUserEmail.toLowerCase(),
+      authorizationUrl,
+      tokenUrl,
+      issuers: googleIssuer
+        ? [googleIssuer]
+        : ["https://accounts.google.com", "accounts.google.com"],
+      callback: new URL("/auth/google/callback", issuer),
+      maxUsers: config.MAX_USERS,
+    };
   }
   return {
     port: config.PORT,
@@ -185,7 +269,8 @@ export function readConfig(env: NodeJS.ProcessEnv) {
       issuer,
       resource: new URL("/mcp", issuer),
       redirects: config.OAUTH_ALLOWED_REDIRECT_URIS,
-      encryptionKey: config.TOTP_ENCRYPTION_KEY,
+      google,
+      requestsPerMinute: config.MAX_REQUESTS_PER_USER_PER_MINUTE,
       secureCookies:
         config.NODE_ENV === "production" || issuer.protocol === "https:",
       trustProxy: config.TRUST_PROXY === "off" ? false : config.TRUST_PROXY,

@@ -104,8 +104,8 @@ export function multiuserSpecs(schema: string) {
       const [clientTransport, serverTransport] =
         InMemoryTransport.createLinkedPair();
       const token = randomBytes(32).toString("base64url");
-      await sql`INSERT INTO web_sessions (token_hash, created_at, expires_at)
-        VALUES (${digest(token)}, UTC_TIMESTAMP(3), DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR))`.execute(
+      await sql`INSERT INTO web_sessions (token_hash, user_id, created_at, expires_at)
+        VALUES (${digest(token)}, ${bId}, UTC_TIMESTAMP(3), DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR))`.execute(
         db,
       );
       const app = express().use(
@@ -113,7 +113,6 @@ export function multiuserSpecs(schema: string) {
         dashboardApi(
           readConfig({ PUBLIC_URL: "https://finance.example" }).auth,
           db as AuthDb,
-          bId,
         ),
       );
       const tools: [string, Record<string, unknown>][] = [

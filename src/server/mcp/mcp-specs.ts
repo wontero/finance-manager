@@ -5,7 +5,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Secret, TOTP } from "otpauth";
 import {
   createConnection,
   type PoolConnection,
@@ -23,10 +22,10 @@ import {
   vi,
 } from "vitest";
 import { createApp } from "../app.js";
-import { replaceUser } from "../auth-credentials.js";
+import { fakeGoogle, responseCookie } from "../google-test-provider.js";
 import { readConfig } from "../config.js";
 import { createDatabase } from "../database.js";
-import { localDatabase, setting } from "../scripts/local-database.js";
+import { localDatabase } from "../scripts/local-database.js";
 import { createMcp } from "./index.js";
 
 const officialTool = "actualizar_tipo_de_cambio_oficial";
@@ -78,8 +77,7 @@ const redirect = "https://claude.ai/api/mcp/auth_callback";
 
 async function issueToken(
   http: ReturnType<typeof request>,
-  password: string,
-  secret: Secret,
+  google: Awaited<ReturnType<typeof fakeGoogle>>,
 ) {
   const {
     body: { client_id },
@@ -95,7 +93,7 @@ async function issueToken(
     .expect(201);
   const verifier = randomBytes(32).toString("base64url");
   const form = (response: Response) => ({
-    cookie: response.get("Set-Cookie")![0].split(";")[0],
+    cookie: responseCookie(response),
     csrf: /name="csrf" value="([^"]+)"/.exec(response.text)![1],
   });
   const login = form(
@@ -114,16 +112,18 @@ async function issueToken(
       })
       .expect(200),
   );
+  const googleStart = await http
+    .post("/authorize/google")
+    .set("Cookie", login.cookie)
+    .type("form")
+    .send({ csrf: login.csrf })
+    .expect(303);
+  const { cookie, ...query } = google.callback(googleStart, "owner");
   const consent = form(
     await http
-      .post("/authorize/login")
-      .set("Cookie", login.cookie)
-      .type("form")
-      .send({
-        csrf: login.csrf,
-        password,
-        totp: new TOTP({ secret }).generate(),
-      })
+      .get("/auth/google/callback")
+      .set("Cookie", cookie)
+      .query(query)
       .expect(200),
   );
   const approved = await http
@@ -155,6 +155,9 @@ export function mcpSpecs(
   describe("M-006: herramientas de dominio mediante OAuth y el cliente MCP", () => {
     const sdk = new Client({ name: "finance-m006-tests", version: "1" });
     let database: ReturnType<typeof createDatabase>;
+    let reader: ReturnType<typeof createDatabase>;
+    let google: Awaited<ReturnType<typeof fakeGoogle>>;
+    const sqlClient = new Client({ name: "finance-sql-tests", version: "1" });
     let server: ReturnType<ReturnType<typeof createApp>["listen"]>;
     let http: ReturnType<typeof request>;
     let cash: string;
@@ -166,17 +169,26 @@ export function mcpSpecs(
         ...localDatabase("DATABASE_URL"),
         database: schema,
       });
-      const url = new URL(setting("READONLY_DATABASE_URL"));
-      url.pathname = readonly;
-      const key = randomBytes(32);
-      const password = randomBytes(32).toString("base64url");
-      const secret = new Secret({ size: 20 });
-      await replaceUser(database.db, key, password, secret);
+      reader = createDatabase({
+        ...localDatabase("READONLY_DATABASE_URL"),
+        database: readonly,
+        connectionLimit: 2,
+        multipleStatements: false,
+      });
+      const [sqlTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair();
+      await Promise.all([
+        createMcp("finance-sql-tests", database.db, reader.pool, "1").connect(
+          serverTransport,
+        ),
+        sqlClient.connect(sqlTransport),
+      ]);
+      google = await fakeGoogle();
       const app = createApp(
         readConfig({
           PUBLIC_URL: origin,
-          TOTP_ENCRYPTION_KEY: key.toString("base64"),
-          READONLY_DATABASE_URL: url.href,
+          ...google.env,
+          MAX_REQUESTS_PER_USER_PER_MINUTE: "10000",
         }),
         undefined,
         database,
@@ -184,7 +196,7 @@ export function mcpSpecs(
       server = app.listen(0, "127.0.0.1");
       await once(server, "listening");
       http = request(server);
-      const token = await issueToken(http, password, secret);
+      const token = await issueToken(http, google);
       const address = server.address();
       if (!address || typeof address === "string")
         throw new Error("Falta el puerto de pruebas.");
@@ -200,6 +212,9 @@ export function mcpSpecs(
 
     afterAll(async () => {
       await sdk.close();
+      await sqlClient.close();
+      await reader?.db.destroy();
+      await google?.close();
       if (server) {
         const close = once(server, "close");
         server.close();
@@ -209,7 +224,10 @@ export function mcpSpecs(
     });
 
     const call = (name: string, args: Record<string, unknown> = {}) =>
-      sdk.callTool({ name, arguments: args });
+      (name === "consulta_sql" ? sqlClient : sdk).callTool({
+        name,
+        arguments: args,
+      });
     const success = async (name: string, args?: Record<string, unknown>) => {
       const result = await call(name, args);
       expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
@@ -393,7 +411,7 @@ export function mcpSpecs(
 
       beforeAll(async () => {
         for (let i = 0; i < 2; i++) {
-          const server = createMcp("m017-test", database.db, undefined);
+          const server = createMcp("m017-test", database.db, undefined, "1");
           const client = new Client({
             name: "finance-m017-tests",
             version: "1",
@@ -990,7 +1008,7 @@ export function mcpSpecs(
         /auth_|oauth_|audit_log/i,
       );
       for (const table of [
-        "auth_users",
+        "google_login_requests",
         "oauth_clients",
         "oauth_tokens",
         "audit_log",
@@ -1273,7 +1291,7 @@ export function mcpSpecs(
       };
       const interest = async (kind: "income" | "expense") => {
         const [rows] = await migration().execute<RowDataPacket[]>(
-          "SELECT a.id, a.name, a.is_system, p.name AS root FROM accounts a JOIN accounts p ON p.id = a.parent_id WHERE a.kind = ? AND a.name = 'Intereses' AND a.archived_at IS NULL",
+          "SELECT a.id, a.name, a.is_system, p.name AS root FROM accounts a JOIN accounts p ON p.id = a.parent_id AND p.user_id = a.user_id WHERE a.user_id = 1 AND a.kind = ? AND a.name = 'Intereses' AND a.archived_at IS NULL",
           [kind],
         );
         return rows;

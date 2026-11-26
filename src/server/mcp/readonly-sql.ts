@@ -121,9 +121,7 @@ export function registerSql(server: ToolServer, pool: Pool | undefined) {
     "read",
     async ({ sql }) => {
       if (!pool)
-        throw new Error(
-          "Configura la conexión de solo lectura para consultar las vistas.",
-        );
+        throw new Error("La consulta SQL de solo lectura no está disponible.");
       const statement = singleSelect(sql);
       try {
         const data = await select(pool, statement);

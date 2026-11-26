@@ -9,12 +9,11 @@ import {
 import express, { type ErrorRequestHandler } from "express";
 import { z } from "zod";
 import type { AuthConfig } from "./auth-provider.js";
-import { loginRateLimit } from "./auth-rate-limit.js";
-import type { AuthDb } from "./auth-store.js";
+import { allowUserRequest } from "./auth-rate-limit.js";
+import { authTransaction, revokeAll, type AuthDb } from "./auth-store.js";
 import { UndoConflict } from "./ledger/audit.js";
 import { shiftMonth } from "./ledger/dashboard.js";
 import { createLedger } from "./ledger/index.js";
-import { legacyUserId } from "./ledger/provision.js";
 import { webSession } from "./web-session.js";
 
 export const dashboardHeaders = {
@@ -71,14 +70,9 @@ function ordered({ from, to }: { from?: string; to?: string }) {
   return !from || !to || from <= to;
 }
 
-export function dashboardApi(
-  config: AuthConfig,
-  db?: AuthDb,
-  userId = legacyUserId,
-) {
+export function dashboardApi(config: AuthConfig, db?: AuthDb) {
   const router = express.Router({ strict: true });
-  const session = webSession(config.issuer.protocol === "https:");
-  const ledger = db && createLedger(db, "web", userId);
+  const session = webSession(config.secureCookies);
   const authenticated: DashboardSession = { authenticated: true };
 
   router.use((request, response, next) => {
@@ -96,30 +90,34 @@ export function dashboardApi(
     next();
   });
 
-  router.post(
-    "/session",
-    loginRateLimit((_request, response) => {
-      response.status(429).json({
-        error: "Demasiadas solicitudes. Vuelve a intentarlo más tarde.",
-      });
-    }),
-    express.json({ limit: "4kb" }),
-    (request, response) => session.login(db, request, response),
-  );
-
   router.use(async (request, response, next) => {
-    const hash = db && (await session.find(db, request));
-    if (!db || !hash) {
+    const active = db && (await session.find(db, request));
+    if (!db || !active) {
       response.status(401).json({ error: "Inicia sesión para continuar." });
       return;
     }
     if (
+      !(await allowUserRequest(
+        db,
+        active.userId,
+        config.requestsPerMinute,
+        response,
+      ))
+    )
+      return;
+    if (
       request.method === "DELETE" &&
       request.path.toLowerCase() === "/session"
     ) {
-      await session.logout(db, hash, response);
+      await session.logout(db, active, response);
       return;
     }
+    if (request.method === "POST" && request.path === "/session/revoke") {
+      await authTransaction(db, (trx) => revokeAll(trx, active.userId));
+      session.clear(response);
+      return;
+    }
+    response.locals.ledger = createLedger(db, "web", active.userId);
     next();
   });
 
@@ -128,10 +126,10 @@ export function dashboardApi(
     const { month = todayLaPaz().slice(0, 7) } = z
       .strictObject({ month: monthInput.optional() })
       .parse(request.query);
-    response.json(await ledger!.dashboardSummary(month));
+    response.json(await response.locals.ledger.dashboardSummary(month));
   });
   router.get("/accounts", async (_request, response) =>
-    response.json(await ledger!.dashboardAccounts()),
+    response.json(await response.locals.ledger.dashboardAccounts()),
   );
   router.get("/transactions", async (request, response) => {
     const {
@@ -142,7 +140,7 @@ export function dashboardApi(
       ...input
     } = transactionQuery.parse(request.query);
     response.json(
-      await ledger!.dashboardTransactions({
+      await response.locals.ledger.dashboardTransactions({
         ...input,
         accountId: account,
         categoryId: category,
@@ -163,15 +161,17 @@ export function dashboardApi(
         .json({ error: "Selecciona un rango ordenado de hasta 60 meses." });
       return;
     }
-    response.json(await ledger!.dashboardReports(start, to));
+    response.json(await response.locals.ledger.dashboardReports(start, to));
   });
   router.get("/operations", async (request, response) => {
     const { before, limit } = operationsQuery.parse(request.query);
-    response.json(await ledger!.dashboardOperations(limit, before));
+    response.json(
+      await response.locals.ledger.dashboardOperations(limit, before),
+    );
   });
   router.post("/operations/:id/undo", async (request, response) => {
     const { id } = ledgerInputs.undoOperation.parse(request.params);
-    const result = await ledger!.undoOperation(id);
+    const result = await response.locals.ledger.undoOperation(id);
     const payload: DashboardUndo = { operationId: result.operationId };
     response.json(payload);
   });

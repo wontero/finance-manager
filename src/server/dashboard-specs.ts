@@ -1,13 +1,12 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { decimalMoney, parseAmount } from "@finance-manager/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { sql } from "kysely";
-import { Secret } from "otpauth";
 import request from "supertest";
 import { expect, test } from "vitest";
 import { createApp } from "./app.js";
-import { replaceUser } from "./auth-credentials.js";
+import { fakeGoogle } from "./google-test-provider.js";
 import { authTransaction, digest, purgeAuth, revokeAll } from "./auth-store.js";
 import { readConfig } from "./config.js";
 import { createDatabase } from "./database.js";
@@ -17,60 +16,74 @@ import { localDatabase } from "./scripts/local-database.js";
 
 const origin = "https://finanzas.example";
 const path = "/api/session";
-const password = randomBytes(24).toString("hex");
-const key = randomBytes(32);
-const secret = new Secret({ size: 20 });
 
 export function dashboardSpecs(schema: string) {
   function verify(
     name: string,
-    check: (ctx: ReturnType<typeof fixture>) => Promise<void>,
+    check: (ctx: Awaited<ReturnType<typeof fixture>>) => Promise<void>,
   ) {
     test(
       "M-015 " + name,
       async () => {
-        const ctx = fixture();
+        const ctx = await fixture();
         try {
-          await sql`DELETE FROM auth_attempts`.execute(ctx.db);
           await sql`DELETE FROM auth_events`.execute(ctx.db);
-          await replaceUser(ctx.db, key, password, secret);
           await check(ctx);
         } finally {
           await ctx.db.destroy();
+          await ctx.google.close();
         }
       },
       25_000,
     );
   }
 
-  function fixture() {
+  async function fixture() {
+    const google = await fakeGoogle();
     const connection = createDatabase({
       ...localDatabase("DATABASE_URL"),
       database: schema,
     });
     const api = request(
-      createApp(readConfig({ PUBLIC_URL: origin }), undefined, connection),
+      createApp(
+        readConfig({
+          ...google.env,
+          PUBLIC_URL: origin,
+          MAX_REQUESTS_PER_USER_PER_MINUTE: "10000",
+        }),
+        undefined,
+        connection,
+      ),
     );
-    const login = (value = password) =>
-      api.post(path).set("Origin", origin).send({ password: value });
-    const session = async () =>
-      (await login().expect(200)).headers["set-cookie"][0].split(
-        ";",
-      )[0] as string;
+    const login = async () => {
+      const start = await api.get("/auth/google/start").expect(303);
+      const { cookie, ...query } = google.callback(start, "owner");
+      return api
+        .get("/auth/google/callback")
+        .set("Cookie", cookie)
+        .query(query)
+        .expect(303);
+    };
+    const cookie = (response: Awaited<ReturnType<typeof login>>) =>
+      response
+        .get("Set-Cookie")!
+        .find((value) => value.startsWith("__Host-fm-session="))!;
+    const session = async () => cookie(await login()).split(";")[0];
     return {
       db: connection.db,
       api,
       login,
+      cookie,
+      google,
       session,
       ledger: createLedger(connection.db, "claude", "1"),
     };
   }
 
   verify(
-    "S1: contraseña, cookie segura y bloqueo compartido",
-    async ({ db, login }) => {
-      const success = await login().expect(200);
-      const header = success.headers["set-cookie"][0] as string;
+    "S1: Google entrega una cookie segura vinculada al usuario",
+    async ({ db, login, cookie }) => {
+      const header = cookie(await login());
       expect(header).toMatch(/^__Host-[\w-]+=[\w-]{43};/);
       for (const attribute of [
         "HttpOnly",
@@ -90,28 +103,11 @@ export function dashboardSpecs(schema: string) {
           )
         ).rows,
       ).toEqual([{ token_hash: digest(token) }]);
-      const invalid = await login("incorrecta").expect(401);
-      await sql`UPDATE auth_users SET password_hash = NULL`.execute(db);
-      expect((await login().expect(401)).body).toEqual(invalid.body);
-      for (let attempt = 2; attempt < 5; attempt++)
-        await login("incorrecta").expect(401);
-      await login().expect(429);
-      const events =
-        await sql`SELECT outcome, ip, client_id FROM auth_events WHERE event_type = 'login' ORDER BY id`.execute(
-          db,
-        );
-      expect(events.rows).toEqual(
-        ["success", ...Array(5).fill("invalid"), "blocked"].map((outcome) => ({
-          outcome,
-          ip: "127.0.0.1",
-          client_id: null,
-        })),
-      );
     },
   );
 
   verify(
-    "S2: expiración, revocación, purga y rotación de credenciales",
+    "S2: expiración, cierre, revocación y purga de sesiones",
     async ({ db, api, session }) => {
       await api
         .get(path)
@@ -137,20 +133,15 @@ export function dashboardSpecs(schema: string) {
         .set("Origin", origin)
         .expect(204);
       await api.get(path).set("Cookie", loggedOut).expect(401);
-      for (const revoke of [
-        () => authTransaction(db, revokeAll),
-        () => replaceUser(db, key, password, secret),
-      ]) {
-        const cookies = [await session(), await session()];
-        await revoke();
-        for (const cookie of cookies)
-          await api.get(path).set("Cookie", cookie).expect(401);
-      }
+      const cookies = [await session(), await session()];
+      await authTransaction(db, (trx) => revokeAll(trx, "1"));
+      for (const cookie of cookies)
+        await api.get(path).set("Cookie", cookie).expect(401);
     },
   );
 
   verify(
-    "S3: origen obligatorio en login, logout y undo, sin efectos",
+    "S3: origen obligatorio en logout, revocación y undo, sin efectos",
     async ({ db, api, session, ledger }) => {
       const cookie = await session();
       const { operationId } = await ledger.createAccount({
@@ -161,7 +152,7 @@ export function dashboardSpecs(schema: string) {
       });
       for (const badOrigin of [undefined, "https://otra.example"]) {
         for (const call of [
-          api.post(path).send({ password }),
+          api.post(path + "/revoke"),
           api.delete(path),
           api.post("/api/operations/" + operationId + "/undo"),
         ]) {
@@ -415,29 +406,19 @@ export function dashboardSpecs(schema: string) {
 
   verify(
     "S6: JSON, no-store y ausencia de secretos en cuerpos",
-    async ({ api, login }) => {
-      const success = await login().expect(200);
-      const cookie = success.headers["set-cookie"][0].split(";")[0];
+    async ({ api, session }) => {
+      const cookie = await session();
       const responses = [
-        success,
+        await api.get(path).set("Cookie", cookie).expect(200),
         await api.get(path).expect(401),
-        await api.post(path).send({ password }).expect(403),
+        await api.post(path + "/revoke").expect(403),
         await api.get("/api/desconocido").set("Cookie", cookie).expect(404),
         await api.get("/api/operations").set("Cookie", cookie).expect(200),
-        await api
-          .post(path)
-          .set("Origin", origin)
-          .set("Content-Type", "application/json")
-          .send("{")
-          .expect(400),
       ];
       for (const response of responses) {
         expect(response.headers["cache-control"]).toBe("no-store");
         expect(response.headers["content-type"]).toMatch(/application\/json/);
-        expect(response.text).not.toMatch(
-          /password_hash|token_hash|totp_encrypted/i,
-        );
-        expect(response.text).not.toContain(password);
+        expect(response.text).not.toMatch(/token_hash/i);
         expect(response.text).not.toContain(cookie.split("=")[1]);
       }
     },
@@ -517,7 +498,7 @@ export function dashboardSpecs(schema: string) {
         ],
       ] as const;
 
-      const mcp = createMcp("m015b-test", db, undefined);
+      const mcp = createMcp("m015b-test", db, undefined, "1");
       const client = new Client({ name: "m015b-test", version: "1" });
       const [fromClient, fromServer] = InMemoryTransport.createLinkedPair();
       await mcp.connect(fromServer);

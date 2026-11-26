@@ -5,7 +5,6 @@ import {
   useCallback,
   useEffect,
   useState,
-  type FormEvent,
   type MouseEvent,
 } from "react";
 import { Activity } from "./activity";
@@ -185,27 +184,6 @@ export function App() {
     });
   }
 
-  async function login(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const password = new FormData(event.currentTarget).get("password");
-    setError(undefined);
-    setPending(true);
-    try {
-      await api<DashboardSession>("/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      history.replaceState(null, "", "/");
-      setPage(pages[0]);
-      setSession("active");
-    } catch (error) {
-      setError(errorText(error));
-    } finally {
-      setPending(false);
-    }
-  }
-
   async function logout() {
     setPending(true);
     setError(undefined);
@@ -231,23 +209,9 @@ export function App() {
             <Loading />
           ) : (
             <>
-              <h1>Iniciar sesión</h1>
-              <form onSubmit={login}>
-                <label>
-                  Contraseña
-                  <input
-                    type="password"
-                    name="password"
-                    autoComplete="current-password"
-                    required
-                    maxLength={1024}
-                  />
-                </label>
-                <Alert error={error} />
-                <Button type="submit" disabled={pending}>
-                  {pending ? "Entrando…" : "Entrar"}
-                </Button>
-              </form>
+              <Button asChild>
+                <a href="/auth/google/start">Iniciar sesión con Google</a>
+              </Button>
             </>
           )}
         </section>

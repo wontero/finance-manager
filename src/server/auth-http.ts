@@ -12,7 +12,11 @@ import {
   scope,
   type AuthConfig,
 } from "./auth-provider.js";
-import { authorizationForms, authorizationHeaders } from "./auth-pages.js";
+import {
+  authorizationForms,
+  authorizationHeaders,
+  googleForms,
+} from "./auth-pages.js";
 import { authRateLimitIp } from "./auth-rate-limit.js";
 import { authContext, clientIp, type AuthDb } from "./auth-store.js";
 
@@ -100,6 +104,14 @@ export function installAuth(app: Express, config: AuthConfig, db?: AuthDb) {
       next,
     );
   });
+  app.use(
+    "/auth/google",
+    (_request, response, next) => {
+      authorizationHeaders(response, config);
+      next();
+    },
+    googleForms(config, db),
+  );
   app.use(
     "/authorize",
     (_request, response, next) => {

@@ -15,6 +15,7 @@ import { afterAll, beforeAll, expect, test } from "vitest";
 import { dashboardSpecs } from "./dashboard-specs.js";
 import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
+import { googleSpecs, seedPreviousAuth } from "./google-specs.js";
 import { UndoConflict } from "./ledger/audit.js";
 import { createLedger } from "./ledger/index.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
@@ -25,6 +26,7 @@ import { mcpSpecs } from "./mcp/mcp-specs.js";
 import * as accountingMigration from "./migrations/202611242020_accounting_schema.js";
 import * as authenticationMigration from "./migrations/202611242230_authentication.js";
 import * as loanMigration from "./migrations/202611250900_loans.js";
+import * as sessionMigration from "./migrations/202611251500_web_sessions.js";
 import * as ownershipMigration from "./migrations/202611261200_user_ownership.js";
 import { multiuserSpecs } from "./multiuser-specs.js";
 import {
@@ -38,12 +40,11 @@ const readOnlySchema = "finance_test_ro";
 const tables = [
   "accounts",
   "audit_log",
-  "auth_attempts",
   "auth_events",
-  "auth_users",
   "currencies",
   "custom_field_definitions",
   "exchange_rates",
+  "google_login_requests",
   "kysely_migration",
   "kysely_migration_lock",
   "loans",
@@ -55,6 +56,7 @@ const tables = [
   "tags",
   "transaction_tags",
   "transactions",
+  "user_request_limits",
   "users",
   "web_sessions",
 ];
@@ -278,6 +280,8 @@ beforeAll(async () => {
     });
     const { error } = await prior.migrateToLatest();
     if (error) throw error;
+    await sessionMigration.up(db);
+    await seedPreviousAuth(db);
     const accounts = db.withTables<LedgerDatabase>();
     const income = await accounts
       .selectFrom("accounts")
@@ -1328,6 +1332,7 @@ test.skipIf(
 );
 
 ledgerSpecs(() => ({ migration, reader }));
+googleSpecs(schema, readOnlySchema);
 authSpecs(() => ({ app, reader }));
 mcpSpecs(() => migration, schema, readOnlySchema);
 multiuserSpecs(schema);

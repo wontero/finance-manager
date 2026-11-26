@@ -43,6 +43,7 @@ const accessSeconds = 3600;
 
 type AuthorizationCode = {
   id: Buffer;
+  user_id: string;
   code_challenge: Buffer;
   phase: "code" | "used";
   redirect_uri: string;
@@ -51,6 +52,7 @@ type AuthorizationCode = {
 
 type RefreshToken = {
   family_id: Buffer;
+  user_id: string;
   family_expires_at: string;
   rotated_at: string | null;
   revoked_at: string | null;
@@ -64,7 +66,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
   ) {}
 
   private get db() {
-    if (!this.database || !this.config.encryptionKey)
+    if (!this.database || !this.config.google)
       throw new ServerError("Autenticación pendiente de configuración");
     return this.database;
   }
@@ -163,8 +165,9 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
     const {
       rows: [row],
     } = await sql<AuthorizationCode>`
-      SELECT id, code_challenge, phase, redirect_uri, resource FROM oauth_authorization_codes
+      SELECT id, user_id, code_challenge, phase, redirect_uri, resource FROM oauth_authorization_codes
       WHERE code_hash = ${digest(code)} AND client_id = ${client.client_id}
+        AND user_id IS NOT NULL AND phase IN ('code', 'used')
         AND (expires_at > UTC_TIMESTAMP(3) OR phase = 'used')
     `.execute(db);
     if (!row) throw invalidGrant();
@@ -194,14 +197,14 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
       )
         throw invalidGrant();
       if (row.phase === "used") {
-        await revokeFamily(db, row.id);
+        await revokeFamily(db, row.id, row.user_id);
         await authEvent(db, "issue", "replay", client.client_id);
         return null;
       }
       await sql`UPDATE oauth_authorization_codes SET phase = 'used' WHERE id = ${row.id}`.execute(
         db,
       );
-      const issued = await this.issueTokens(db, client, row.id);
+      const issued = await this.issueTokens(db, client, row.id, row.user_id);
       await authEvent(db, "issue", "success", client.client_id);
       return issued;
     });
@@ -223,13 +226,13 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
       const {
         rows: [row],
       } = await sql<RefreshToken>`
-        SELECT family_id, family_expires_at, rotated_at, revoked_at,
+        SELECT family_id, user_id, family_expires_at, rotated_at, revoked_at,
           (expires_at > UTC_TIMESTAMP(3) AND family_expires_at > UTC_TIMESTAMP(3)) AS active
         FROM oauth_tokens WHERE token_hash = ${hash} AND token_type = 'refresh'
           AND client_id = ${client.client_id} AND resource = ${this.config.resource.href}
       `.execute(db);
       if (row?.rotated_at) {
-        await revokeFamily(db, row.family_id);
+        await revokeFamily(db, row.family_id, row.user_id);
         await authEvent(db, "refresh", "replay", client.client_id);
         return null;
       }
@@ -243,6 +246,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
         db,
         client,
         row.family_id,
+        row.user_id,
         row.family_expires_at,
       );
       await authEvent(db, "refresh", "success", client.client_id);
@@ -256,6 +260,7 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
     db: AuthDb,
     client: Client,
     family: Buffer,
+    userId: string,
     deadline?: string,
   ) {
     const access = newToken();
@@ -265,10 +270,10 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
         ? sql`DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 90 DAY)`
         : sql`${deadline}`;
     await sql`INSERT INTO oauth_tokens
-      (token_hash, token_type, family_id, client_id, resource, expires_at, family_expires_at) VALUES
-      (${digest(access)}, 'access', ${family}, ${client.client_id}, ${this.config.resource.href},
+      (token_hash, token_type, family_id, user_id, client_id, resource, expires_at, family_expires_at) VALUES
+      (${digest(access)}, 'access', ${family}, ${userId}, ${client.client_id}, ${this.config.resource.href},
         LEAST(DATE_ADD(UTC_TIMESTAMP(3), INTERVAL ${accessSeconds} SECOND), ${familyExpiry}), ${familyExpiry}),
-      (${digest(refresh)}, 'refresh', ${family}, ${client.client_id}, ${this.config.resource.href},
+      (${digest(refresh)}, 'refresh', ${family}, ${userId}, ${client.client_id}, ${this.config.resource.href},
         LEAST(DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 DAY), ${familyExpiry}), ${familyExpiry})
     `.execute(db);
     await purgeAuth(db);
@@ -295,16 +300,17 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string) {
-    if (
-      !opaqueToken.test(token) ||
-      !this.database ||
-      !this.config.encryptionKey
-    )
+    if (!opaqueToken.test(token) || !this.database || !this.config.google)
       throw new InvalidTokenError("Token inválido");
     const {
       rows: [row],
-    } = await sql<{ client_id: string; expires_at: string; resource: string }>`
-      SELECT t.client_id, t.expires_at, t.resource FROM oauth_tokens t
+    } = await sql<{
+      user_id: string;
+      client_id: string;
+      expires_at: string;
+      resource: string;
+    }>`
+      SELECT t.user_id, t.client_id, t.expires_at, t.resource FROM oauth_tokens t
       WHERE t.token_hash = ${digest(token)} AND t.token_type = 'access' AND t.revoked_at IS NULL
         AND t.expires_at > UTC_TIMESTAMP(3) AND t.family_expires_at > UTC_TIMESTAMP(3)
         AND t.resource = ${this.config.resource.href}
@@ -313,6 +319,8 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
       throw new InvalidTokenError("Token inválido");
     return {
       token,
+      userId: row.user_id,
+      extra: { userId: row.user_id },
       clientId: row.client_id,
       scopes: [scope],
       expiresAt: Date.parse(row.expires_at.replace(" ", "T") + "Z") / 1000,
@@ -325,11 +333,11 @@ export class FinanceOAuthProvider implements OAuthServerProvider {
     await authTransaction(this.db, async (db) => {
       const {
         rows: [row],
-      } = await sql<{ family_id: Buffer }>`
-        SELECT family_id FROM oauth_tokens
+      } = await sql<{ family_id: Buffer; user_id: string }>`
+        SELECT family_id, user_id FROM oauth_tokens
         WHERE token_hash = ${digest(token)} AND client_id = ${client.client_id}
       `.execute(db);
-      if (row) await revokeFamily(db, row.family_id);
+      if (row) await revokeFamily(db, row.family_id, row.user_id);
       await authEvent(
         db,
         "revoke",

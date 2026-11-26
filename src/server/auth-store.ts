@@ -1,19 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
+import type { Request } from "express";
 import { sql, type Kysely } from "kysely";
 
 export type AuthDb = Kysely<unknown>;
-
-export type AuthUser = {
-  password_hash: Buffer | null;
-  password_salt: Buffer | null;
-  scrypt_n: number | null;
-  scrypt_r: number | null;
-  scrypt_p: number | null;
-  totp_encrypted: Buffer | null;
-  last_totp_step: string | null;
-};
 
 export const authContext = new AsyncLocalStorage<{
   ip: string | null;
@@ -23,6 +14,15 @@ export const authContext = new AsyncLocalStorage<{
 export const newToken = () => randomBytes(32).toString("base64url");
 export const digest = (secret: string) =>
   createHash("sha256").update(secret).digest();
+
+export function readCookie(request: Request, name: string) {
+  const cookies = request.headers.cookie
+    ?.split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(name + "="));
+  const token = cookies?.length === 1 ? cookies[0].slice(name.length + 1) : "";
+  return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : undefined;
+}
 
 export function clientIp(address: string | undefined) {
   const ip = address?.replace(/^::ffff:(?=\d+\.)/i, "");
@@ -34,26 +34,32 @@ export function clientIp(address: string | undefined) {
     : null;
 }
 
-// Serialize changes to credentials, login attempts, codes and token families.
+// Registration and OAuth mutations share a lock across Passenger processes.
+export const authLock = sql`CONCAT('fm:auth:', LEFT(SHA2(DATABASE(), 256), 48))`;
+
 export function authTransaction<T>(
   db: AuthDb,
-  action: (db: AuthDb, user: AuthUser) => Promise<T>,
+  action: (db: AuthDb) => Promise<T>,
 ) {
-  return db.transaction().execute(async (trx) => {
+  return db.connection().execute(async (connection) => {
     const {
-      rows: [user],
-    } = await sql<AuthUser>`
-      SELECT * FROM auth_users WHERE id = 1 FOR UPDATE
-    `.execute(trx);
-    if (!user)
-      throw new Error("La migración de autenticación no está aplicada");
-    return action(trx, user);
+      rows: [row],
+    } = await sql<{ acquired: number | string | null }>`
+      SELECT GET_LOCK(${authLock}, 5) AS acquired
+    `.execute(connection);
+    if (Number(row.acquired) !== 1)
+      throw new Error("No se pudo obtener el bloqueo de autenticación.");
+    try {
+      return await connection.transaction().execute(action);
+    } finally {
+      await sql`SELECT RELEASE_LOCK(${authLock})`.execute(connection);
+    }
   });
 }
 
 export function authEvent(
   db: AuthDb,
-  type: "login" | "issue" | "refresh" | "revoke" | "setup" | "unlock",
+  type: "login" | "issue" | "refresh" | "revoke",
   outcome: "success" | "invalid" | "blocked" | "replay" | "error",
   clientId: string | null = null,
 ) {
@@ -61,42 +67,6 @@ export function authEvent(
   return sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id)
     VALUES (${type}, ${outcome}, ${context?.ip ?? null}, ${context?.agent ?? null}, ${clientId})
   `.execute(db);
-}
-
-export async function loginBlocked(db: AuthDb, ip: string | null) {
-  const {
-    rows: [counts],
-  } = await sql<{ global_count: string; ip_count: string | null }>`
-    SELECT COUNT(*) AS global_count,
-      SUM(ip = ${ip} AND created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)) AS ip_count
-    FROM auth_attempts WHERE created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
-  `.execute(db);
-  return Number(counts.ip_count) >= 5 || Number(counts.global_count) >= 20;
-}
-
-export function recordBlockedLogin(db: AuthDb, clientId: string | null) {
-  const context = authContext.getStore();
-  const ip = context?.ip ?? null;
-  // Different Passenger processes share this audit guard without locking auth_users.
-  const lock = sql`CONCAT('fm:login:', LEFT(SHA2(CONCAT(DATABASE(), '/', ${ip ?? ""}), 256), 48))`;
-  return db.connection().execute(async (connection) => {
-    const {
-      rows: [row],
-    } = await sql<{
-      acquired: number | string | null;
-    }>`SELECT GET_LOCK(${lock}, 0) AS acquired`.execute(connection);
-    if (Number(row.acquired) !== 1) return;
-    try {
-      await sql`INSERT INTO auth_events (event_type, outcome, ip, user_agent, client_id)
-        SELECT 'login', 'blocked', ${ip}, ${context?.agent ?? null}, ${clientId}
-        FROM DUAL WHERE NOT EXISTS (
-          SELECT 1 FROM auth_events WHERE event_type = 'login' AND outcome = 'blocked' AND ip <=> ${ip}
-            AND created_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)
-        )`.execute(connection);
-    } finally {
-      await sql`SELECT RELEASE_LOCK(${lock})`.execute(connection);
-    }
-  });
 }
 
 export async function purgeAuth(db: AuthDb) {
@@ -110,9 +80,6 @@ export async function purgeAuth(db: AuthDb) {
       AND (phase <> 'used' OR NOT EXISTS (
         SELECT 1 FROM oauth_tokens t WHERE t.family_id = oauth_authorization_codes.id AND ${live}
       ))`.execute(db);
-  await sql`DELETE FROM auth_attempts WHERE created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 24 HOUR)`.execute(
-    db,
-  );
   await sql`DELETE FROM auth_events WHERE created_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 365 DAY)`.execute(
     db,
   );
@@ -132,18 +99,24 @@ export async function purgeAuth(db: AuthDb) {
   await sql`DELETE FROM oauth_clients WHERE id IN (${ids})`.execute(db);
 }
 
-export function revokeFamily(db: AuthDb, family: Buffer) {
+export function revokeFamily(db: AuthDb, family: Buffer, userId: string) {
   return sql`UPDATE oauth_tokens SET revoked_at = UTC_TIMESTAMP(3)
-    WHERE family_id = ${family} AND revoked_at IS NULL`.execute(db);
+    WHERE user_id = CAST(${userId} AS UNSIGNED) AND family_id = ${family} AND revoked_at IS NULL`.execute(
+    db,
+  );
 }
 
-export async function revokeAll(db: AuthDb) {
-  await sql`UPDATE web_sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE revoked_at IS NULL`.execute(
+export async function revokeAll(db: AuthDb, userId: string) {
+  await sql`UPDATE web_sessions SET revoked_at = UTC_TIMESTAMP(3)
+    WHERE user_id = CAST(${userId} AS UNSIGNED) AND revoked_at IS NULL`.execute(
     db,
   );
   await sql`UPDATE oauth_tokens SET revoked_at = UTC_TIMESTAMP(3)
-    WHERE revoked_at IS NULL`.execute(db);
-  await sql`DELETE FROM oauth_authorization_codes WHERE phase <> 'used'`.execute(
+    WHERE user_id = CAST(${userId} AS UNSIGNED) AND revoked_at IS NULL`.execute(
+    db,
+  );
+  await sql`DELETE FROM oauth_authorization_codes
+    WHERE user_id = CAST(${userId} AS UNSIGNED) AND phase <> 'used'`.execute(
     db,
   );
   await authEvent(db, "revoke", "success");

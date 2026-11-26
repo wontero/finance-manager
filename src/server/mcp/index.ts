@@ -4,7 +4,6 @@ import type { Kysely } from "kysely";
 import type { Pool } from "mysql2";
 import { z } from "zod";
 import { createLedger } from "../ledger/index.js";
-import { legacyUserId } from "../ledger/provision.js";
 import { registerLoanTools } from "./loan-tools.js";
 import { registerReads } from "./read-tools.js";
 import { registerSql } from "./readonly-sql.js";
@@ -12,9 +11,9 @@ import { registerTool } from "./tool.js";
 import { registerWrites } from "./write-tools.js";
 
 const instructions = [
-  "Responde breve y directo, en una o dos líneas, salvo que Mateo pida detalle.",
-  "Para totales, saldos o resúmenes, da solo el resultado final: no muestres cálculos, sumas intermedias ni el razonamiento, salvo que Mateo los pida. Tras registrar o deshacer algo, confirma en una línea con el monto y el ID de la operación.",
-  "La moneda base es BOB. Usa USD solo si Mateo lo indica.",
+  "Responde breve y directo, en una o dos líneas, salvo que el usuario pida detalle.",
+  "Para totales, saldos o resúmenes, da solo el resultado final: no muestres cálculos, sumas intermedias ni el razonamiento, salvo que el usuario los pida. Tras registrar o deshacer algo, confirma en una línea con el monto y el ID de la operación.",
+  "La moneda base es BOB. Usa USD solo si el usuario lo indica.",
   "Para valuar USD, usa primero actualizar_tipo_de_cambio_oficial (tipo oficial del BCB vigente). Si falla o necesitas una fecha pasada, busca en la web el tipo de cambio oficial del BCB para ese día y regístralo con registrar_tipo_de_cambio, incluyendo la fuente y el enlace.",
   "La fecha contable no tiene hora: usa AAAA-MM-DD y, si se omite, hoy en America/La_Paz.",
   "Para cargar capturas, usa importar_lote con duplicados omitidos y resume qué se creó y qué se omitió.",
@@ -27,7 +26,7 @@ export function createMcp(
   version: string,
   db: Kysely<unknown> | undefined,
   readonly: Pool | undefined,
-  userId = legacyUserId,
+  userId: string,
 ) {
   const server = new McpServer({ name: APP_NAME, version }, { instructions });
   registerTool(

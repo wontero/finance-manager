@@ -5,7 +5,7 @@
 ## Componentes y responsabilidades
 
 - `src/core` contiene los esquemas Zod de las entradas y las reglas puras de dinero, fecha, cuadre y conversión.
-- `src/server/ledger` ofrece la API de servicios TypeScript mediante `createLedger(db, actor)`. Usa Kysely para aplicar esas reglas a las cuentas, asientos, catálogos y consultas.
+- `src/server/ledger` ofrece la API de servicios TypeScript mediante `createLedger(db, actor, userId)`. Usa Kysely para aplicar esas reglas a las cuentas, asientos, catálogos y consultas.
 - `src/server/mcp` publica herramientas en español tras OAuth. Valida los argumentos con Zod, delega en el dominio con el actor `claude` y devuelve datos estructurados y un resumen breve. Cada operación registrada incluye el ID para deshacerla.
 
 ## Stack tecnológico
@@ -13,7 +13,7 @@
 - Node.js 22 y TypeScript estricto con npm workspaces.
 - `core` proporciona el código compartido. `server` expone la API HTTP con Express. `web` usa React, Vite, Tailwind CSS y shadcn/ui.
 - MariaDB 10.6 almacena los datos en tablas InnoDB con `utf8mb4`. El servidor usa Kysely sobre un pool de `mysql2`.
-- El pool principal abre hasta 5 conexiones y el lector abre hasta 2. Cada pool admite hasta 64 solicitudes en espera. Cada conexión inicia con `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,ERROR_FOR_DIVISION_BY_ZERO` y zona horaria UTC. `/health` comparte y conserva el resultado de su comprobación durante 10 segundos. Su plazo total es de 1,5 segundos, incluso cuando espera una conexión.
+- El pool principal abre hasta 5 conexiones. El pool admite hasta 64 solicitudes en espera. Cada conexión inicia con `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION,ERROR_FOR_DIVISION_BY_ZERO` y zona horaria UTC. `/health` comparte y conserva el resultado de su comprobación durante 10 segundos. Su plazo total es de 1,5 segundos, incluso cuando espera una conexión.
 - Vitest ejecuta las pruebas, Supertest comprueba la API HTTP y Testing Library comprueba la interfaz. ESLint, TypeScript y Prettier verifican el código.
 
 ## Autenticación MCP
@@ -23,37 +23,43 @@ Express usa `mcpAuthRouter` y `requireBearerAuth` del SDK de MCP. Publica metada
 ```mermaid
 sequenceDiagram
     participant C as Claude
-    participant N as Navegador de Mateo
+    participant N as Navegador del usuario
     participant F as Finance Manager
+    participant G as Google
     participant B as MariaDB
     C->>F: POST /mcp sin token
     F-->>C: 401 con enlace a metadatos
     C->>F: GET metadatos y POST /register
     F->>B: Registra el cliente público
     C->>N: Abre /authorize con reto S256
-    N->>F: Envía contraseña y TOTP
-    F->>B: Verifica y consume el paso TOTP
+    N->>F: Pulsa Iniciar sesión con Google
+    F-->>N: Redirige a Google con state, nonce y reto S256
+    N->>G: Inicia sesión
+    G-->>N: Devuelve el código al callback de Finance Manager
+    N->>F: GET /auth/google/callback
+    F->>G: Canjea el código con el verificador PKCE por HTTPS
+    F->>B: Vincula o aprovisiona al usuario
     F-->>N: Muestra el consentimiento
     N->>F: Confirma el acceso
     F-->>N: Redirige al callback con el código
     N->>C: Entrega el código
     C->>F: POST /token con el verificador PKCE
-    F->>B: Consume el código y guarda los hashes
+    F->>B: Consume el código y guarda los hashes por usuario
     F-->>C: Tokens de acceso y refresco
     C->>F: POST /mcp con Bearer
-    F->>B: Verifica vigencia, revocación y recurso
+    F->>B: Verifica el token y consulta el ledger del usuario
     F-->>C: Respuesta MCP
 ```
 
-Los códigos duran cinco minutos y los tokens de acceso duran una hora, hasta el límite de vida de su familia. Cada refresco rota el token, con una ventana deslizante de 30 días y un máximo de 90 días desde la emisión inicial. Si se vuelve a presentar un código consumido con el verificador PKCE correcto, se revoca la familia. El SDK rechaza antes las peticiones sin verificador válido. Reutilizar un refresco rotado también revoca su familia. MariaDB guarda hashes SHA-256 de tokens opacos de 32 bytes. La contraseña se deriva con scrypt y una sal individual. El secreto TOTP se cifra con AES-256-GCM y una clave de entorno.
+Los códigos duran cinco minutos y los tokens de acceso duran una hora, hasta el límite de vida de su familia. Cada refresco rota el token, con una ventana deslizante de 30 días y un máximo de 90 días desde la emisión inicial. Si se vuelve a presentar un código consumido con el verificador PKCE correcto, se revoca la familia. El SDK rechaza antes las peticiones sin verificador válido. Reutilizar un refresco rotado también revoca su familia. MariaDB guarda hashes SHA-256 de tokens opacos de 32 bytes. Los códigos y tokens de Claude pertenecen al usuario que autorizó la conexión.
 
-La emisión y el refresco purgan los códigos vencidos hace más de un día, los intentos de más de 24 horas y los clientes de más de 30 días sin tokens vigentes. Se conserva el registro hash de un código consumido mientras su familia tenga tokens vigentes para poder detectar el reuso. Los eventos de autenticación se conservan.
+La emisión y el refresco purgan los códigos vencidos hace más de un día y los clientes de más de 30 días sin tokens vigentes. Se conserva el registro hash de un código consumido mientras su familia tenga tokens vigentes para poder detectar el reuso. Los eventos de autenticación se purgan al año.
 
-El formulario usa un token CSRF y una cookie ligados a la solicitud. MariaDB serializa los cambios de autenticación y cuenta los intentos fallidos por IP y globalmente. Los eventos registran el tipo, resultado, IP, agente truncado, cliente y fecha UTC. Los datos de autenticación quedan en la base principal, fuera de las vistas de consulta. El endpoint OAuth `/revoke` limita al cliente a la familia del token que presenta. Los comandos administrativos se ejecutan en la terminal del servidor.
+Los formularios usan un token CSRF y una cookie ligados a la solicitud. El callback de Google consume el `state` ligado al navegador y valida el ID token recibido por HTTPS. MariaDB serializa el registro y los cambios de credenciales OAuth entre procesos. Los eventos registran el tipo, resultado, IP, agente truncado, cliente y fecha UTC. Los datos de autenticación quedan en la base principal, fuera de las vistas de consulta. El endpoint OAuth `/revoke` limita al cliente a la familia del token que presenta. El dashboard identifica al usuario mediante la sesión web y aplica CSRF por origen. Los límites de login usan la IP del cliente. Los contadores de `/api` y `/mcp` se comparten en MariaDB por usuario y minuto UTC.
 
 ## Datos contables
 
-`users` identifica al dueño de los datos contables. La migración asigna las filas existentes al usuario #1 y conserva los IDs, las marcas de tiempo y las instantáneas de auditoría. El usuario #1 se crea sin identidad de Google vinculada. Al provisionar a un usuario nuevo se crean sus raíces del sistema, las subcuentas de intereses y ocho categorías básicas. El ledger aplica el alcance de usuario a las lecturas y escrituras. Las claves foráneas compuestas impiden vincular filas de distintos usuarios en cuentas, asientos, etiquetas, préstamos y bitácora.
+`users` identifica al dueño de los datos contables. La migración asigna las filas existentes al usuario #1 y conserva los IDs, las marcas de tiempo y las instantáneas de auditoría. El usuario #1 se crea sin identidad de Google vinculada y se vincula al primer inicio de sesión válido con `FIRST_USER_EMAIL`. Al provisionar a un usuario nuevo se crean sus raíces del sistema, las subcuentas de intereses y ocho categorías básicas. El ledger aplica el alcance de usuario a las lecturas y escrituras. Las claves foráneas compuestas impiden vincular filas de distintos usuarios en cuentas, asientos, etiquetas, préstamos y bitácora.
 
 `MAX_ACCOUNTS_PER_USER`, `MAX_TAGS_PER_USER` y `MAX_TRANSACTIONS_PER_USER_PER_DAY` fijan los topes. Los valores predeterminados son 500 cuentas y categorías, 500 etiquetas y 2.000 movimientos nuevos por día. El último tope cuenta altas según el día de America/La_Paz, con independencia de la fecha contable.
 
@@ -101,4 +107,4 @@ En `resumen_periodo`, los totales incluyen las categorías archivadas dentro de 
 
 Las migraciones TypeScript viven en `src/server/migrations`. Se aplican hacia adelante en orden `AAAAMMDDHHMM_descripcion`. `npm run migrate` comprueba los permisos de triggers antes de inicializar Kysely. Después de aplicar las migraciones, recrea las vistas con el usuario de migración y elimina las vistas obsoletas cuyo nombre empieza por `v_`. El DDL de MariaDB puede dejar cambios parciales si falla una migración. El despliegue toma un volcado previo para recuperar la base principal.
 
-La migración de propiedad admite reintentos de su DDL. El plan P-002 requiere esperar la aprobación de M-023 antes de desplegar, porque las vistas de `consulta_sql` aún consultan las tablas completas.
+La migración de propiedad admite reintentos de su DDL. El plan P-002 requiere esperar la aprobación de M-023 antes de desplegar, M-022 conserva `consulta_sql` en el catálogo y bloquea su ejecución desde el endpoint MCP hasta que las vistas se aíslen por usuario.

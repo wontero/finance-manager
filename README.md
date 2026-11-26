@@ -19,7 +19,7 @@ FinanceManager es un servidor MCP remoto (Model Context Protocol) que permite a 
 | Servidor      | Node.js 22, TypeScript y Express                                     |
 | Datos         | MariaDB 10.6; libro de partida doble y base separada de solo lectura |
 | Web           | React y Vite                                                         |
-| Autenticación | OAuth 2.1, contraseña y TOTP; sesión web con contraseña              |
+| Autenticación | Google OpenID Connect y OAuth 2.1 para Claude                        |
 | Despliegue    | cPanel y Passenger                                                   |
 | Pruebas       | Vitest y suites Bash                                                 |
 
@@ -67,14 +67,14 @@ flowchart LR
 
 ### Dashboard v1
 
-Abre la raíz del sitio e inicia sesión con la contraseña creada mediante `npm run auth:setup`. El dashboard usa solo contraseña por decisión de Mateo. Claude conserva el flujo OAuth con TOTP.
+Abre la raíz del sitio y pulsa **Iniciar sesión con Google**. Usa la misma cuenta de Google para conectar Claude y ver tus datos en ambos sitios.
 
 - **Resumen** muestra patrimonio, efectivo y cuentas de subtipo banco, ingresos y gastos frente al mes anterior, principales categorías y los últimos movimientos del mes elegido. El disponible se conserva por moneda. Las categorías se ordenan por su valor conocido en Bs al cierre. Si falta una cotización para un saldo, el patrimonio se muestra como parcial.
 - **Cuentas** muestra saldos de activos y pasivos por moneda, permite incluir archivadas y abrir sus movimientos.
 - **Movimientos** permite buscar y filtrar el libro. Los totales diarios incluyen todos los movimientos que coinciden con los filtros. **Informes** compara ingresos y gastos por moneda y muestra el patrimonio en Bs al cierre de cada mes. El rango admite hasta 60 meses.
 - **Actividad de Claude** muestra los cambios de Claude y de la web. Deshacer agrega una operación de reversión con actor `web`. Si una operación posterior entra en conflicto, el ledger informa el motivo al intentar la reversión.
 
-La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El bloqueo por intentos se comparte con OAuth y el inicio de sesión queda en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. Para revocar todas las sesiones web y credenciales OAuth activas, ejecuta `npm run auth:tokens -- revoke-all`.
+La cookie de sesión dura 12 horas desde el inicio. Es `HttpOnly`, `SameSite=Strict` y usa `Secure` con el prefijo `__Host-` bajo HTTPS. La base solo guarda el hash del token. El inicio de sesión se limita por IP y se registra en la bitácora de autenticación. La API exige la sesión, usa `Cache-Control: no-store` y comprueba el origen configurado para toda solicitud distinta de GET o HEAD. Cerrar sesión revoca la sesión actual. El administrador puede revocar todas las sesiones y conexiones de un usuario con `npm run auth:tokens -- revoke-all <usuario>`.
 
 Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno local y abre esa misma dirección. Vite reenvía `/api` al puerto de Express. Con Express sirviendo el build, usa el origen de Express.
 
@@ -83,7 +83,7 @@ Para probar con Vite, configura `PUBLIC_URL=http://localhost:5173` en tu entorno
 - Partida doble con importes enteros en unidades menores, como centavos: [ADR 0003](docs/adr/0003-partida-doble-y-dinero.md).
 - Bitácora append-only, borrado lógico y operaciones reversibles: [ADR 0006](docs/adr/0006-auditoria-y-deshacer.md).
 - Consultas sobre una base separada `_ro` con vistas SQL SECURITY DEFINER y usuario lector: [ADR 0002](docs/adr/0002-mariadb.md).
-- OAuth 2.1 con TOTP y Claude mediante MCP: [ADR 0004](docs/adr/0004-claude-via-mcp.md).
+- Inicio de sesión con Google y conexión OAuth de Claude mediante MCP. [Guía de despliegue](docs/operacion/despliegue.md)
 - Monolito modular TypeScript: [ADR 0001](docs/adr/0001-monolito-modular-typescript.md).
 - Extensiones controladas por metadatos: [ADR 0005](docs/adr/0005-extensibilidad-controlada.md).
 - Despliegue en cPanel con Passenger sin costes recurrentes adicionales: [ADR 0007](docs/adr/0007-despliegue-cpanel-passenger.md).
@@ -108,10 +108,10 @@ npm run dev
 - `npm run dev` inicia Express y Vite. El endpoint de salud está en `http://localhost:3000/health` y la web se abre en `http://localhost:5173`. Puedes cambiar el puerto de Express con `PORT` en `.env`.
 - `npm run build` genera `dist/` en cada workspace. Ejecuta `node app.js` para servir el build de la web, `/health` y `/mcp` desde el mismo proceso.
 - `npm run migrate`, después de compilar, aplica migraciones sobre `MIGRATION_DATABASE_URL` y actualiza las vistas de `READONLY_DATABASE_NAME`. Con el `.env` de ejemplo apunta a `finance_dev` y `finance_dev_ro`.
-- `/mcp` exige un token de acceso OAuth con el ámbito `finance`. Configura `PUBLIC_URL` y `TOTP_ENCRYPTION_KEY`, aplica las migraciones y ejecuta `npm run auth:setup` en una terminal para crear el usuario con contraseña y TOTP. En desarrollo, puedes omitir `PUBLIC_URL` para usar `http://localhost` con `PORT`.
-- Desde Claude puedes registrar gastos, importar capturas en lotes reversibles y consultar saldos, movimientos o patrimonio. `consulta_sql` usa `READONLY_DATABASE_URL` con un usuario lector y las vistas de la base de solo lectura.
-- `npm run auth:tokens -- list` lista los identificadores de tokens activos. Usa `npm run auth:tokens -- revoke <id>` para revocar una familia o `npm run auth:tokens -- revoke-all` para desconectar todos los clientes.
-- `npm run auth:unlock` borra los intentos vigentes de inicio de sesión y conserva los tokens emitidos.
+- `/mcp` exige un token OAuth con ámbito `finance`. Configura `PUBLIC_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `FIRST_USER_EMAIL`. Aplica la migración y vuelve a conectar Claude. El primer inicio de sesión con el correo configurado vincula los datos existentes. [Configuración de Google Cloud](docs/operacion/despliegue.md#cliente-oauth-en-google-cloud)
+- Desde Claude puedes registrar gastos, importar capturas en lotes reversibles y consultar saldos, movimientos o patrimonio. El acceso a `consulta_sql` queda pendiente hasta que las vistas filtren por usuario (M-023).
+- El registro admite hasta 50 usuarios por defecto. Usa `MAX_USERS=0` para cerrar nuevas altas. `MAX_REQUESTS_PER_USER_PER_MINUTE` limita a 120 las peticiones autenticadas por usuario y minuto entre `/mcp` y `/api`.
+- `npm run auth:tokens -- list <usuario>` lista los identificadores activos de ese usuario. `npm run auth:tokens -- revoke <usuario> <token>` revoca una familia.
 
 ## Pruebas
 

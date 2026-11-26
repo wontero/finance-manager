@@ -48,7 +48,6 @@ test("M-015 S7: login, cuatro pantallas con datos, confirmar undo y volver al lo
   let undone = false;
   const fetchApi = vi.fn(async (url: string, options?: RequestInit) => {
     const route = url.split("?")[0];
-    if (options?.method === "POST" && route === "/api/session") active = true;
     if (!active)
       return Response.json({ error: "Inicia sesión." }, { status: 401 });
     switch (route) {
@@ -110,10 +109,14 @@ test("M-015 S7: login, cuatro pantallas con datos, confirmar undo y volver al lo
   });
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});
   render(<App />);
-  fireEvent.change(await screen.findByLabelText("Contraseña"), {
-    target: { value: "prueba" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Entrar" }));
+  expect(
+    (
+      await screen.findByRole("link", { name: "Iniciar sesión con Google" })
+    ).getAttribute("href"),
+  ).toBe("/auth/google/start");
+  cleanup();
+  active = true;
+  render(<App />);
   expect(await screen.findByText("Bs 1.234,56")).toBeDefined();
   fireEvent.click(screen.getByRole("link", { name: "Movimientos" }));
   fireEvent.click(await screen.findByText("Almuerzo"));
@@ -133,7 +136,9 @@ test("M-015 S7: login, cuatro pantallas con datos, confirmar undo y volver al lo
   active = false;
   fireEvent.click(screen.getByRole("link", { name: "Resumen" }));
   await waitFor(() =>
-    expect(screen.getByLabelText("Contraseña")).toBeDefined(),
+    expect(
+      screen.getByRole("link", { name: "Iniciar sesión con Google" }),
+    ).toBeDefined(),
   );
 });
 
