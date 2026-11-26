@@ -4,6 +4,7 @@ import type { Kysely } from "kysely";
 import type { Pool } from "mysql2";
 import { z } from "zod";
 import { createLedger } from "../ledger/index.js";
+import { legacyUserId } from "../ledger/provision.js";
 import { registerLoanTools } from "./loan-tools.js";
 import { registerReads } from "./read-tools.js";
 import { registerSql } from "./readonly-sql.js";
@@ -26,6 +27,7 @@ export function createMcp(
   version: string,
   db: Kysely<unknown> | undefined,
   readonly: Pool | undefined,
+  userId = legacyUserId,
 ) {
   const server = new McpServer({ name: APP_NAME, version }, { instructions });
   registerTool(
@@ -49,7 +51,7 @@ export function createMcp(
     },
   );
   if (db) {
-    const ledger = createLedger(db, "claude");
+    const ledger = createLedger(db, "claude", userId);
     registerReads(server, ledger);
     registerWrites(server, ledger);
     registerLoanTools(server, ledger);

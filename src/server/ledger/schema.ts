@@ -10,6 +10,7 @@ export type LedgerDatabase = {
   currencies: { code: string; name: string; minor_unit: number };
   accounts: {
     id: Generated<string>;
+    user_id: string;
     parent_id: Generated<string | null>;
     name: string;
     kind: AccountKind;
@@ -25,6 +26,7 @@ export type LedgerDatabase = {
   };
   operations: {
     id: string;
+    user_id: string;
     seq: Generated<string>;
     actor: Actor;
     description: string;
@@ -33,6 +35,7 @@ export type LedgerDatabase = {
   };
   loans: {
     id: Generated<string>;
+    user_id: string;
     account_id: string;
     direction: LedgerInput<"registerLoan">["direction"];
     counterparty: string;
@@ -53,6 +56,7 @@ export type LedgerDatabase = {
   };
   transactions: {
     id: Generated<string>;
+    user_id: string;
     date: string;
     description: string;
     note: Generated<string | null>;
@@ -64,16 +68,18 @@ export type LedgerDatabase = {
   };
   postings: {
     id: Generated<string>;
+    user_id: string;
     transaction_id: string;
     account_id: string;
     currency: string;
     amount: string;
     memo: Generated<string | null>;
   };
-  tags: { id: Generated<string>; name: string };
-  transaction_tags: { transaction_id: string; tag_id: string };
+  tags: { id: Generated<string>; name: string; user_id: string };
+  transaction_tags: { transaction_id: string; tag_id: string; user_id: string };
   custom_field_definitions: {
     id: Generated<string>;
+    user_id: string;
     entity: "account" | "transaction";
     key: string;
     label: string;
@@ -82,6 +88,7 @@ export type LedgerDatabase = {
     archived_at: Generated<string | null>;
   };
   exchange_rates: {
+    user_id: string | null;
     from_currency: string;
     to_currency: string;
     date: string;
@@ -90,6 +97,7 @@ export type LedgerDatabase = {
   };
   audit_log: {
     id: Generated<string>;
+    user_id: string;
     operation_id: string;
     table_name: string;
     row_id: string;
@@ -102,7 +110,10 @@ export type LedgerDatabase = {
 
 export type Account = Selectable<LedgerDatabase["accounts"]>;
 export type Posting = Selectable<LedgerDatabase["postings"]>;
-export type ExchangeRate = Selectable<LedgerDatabase["exchange_rates"]>;
+export type ExchangeRate = Omit<
+  Selectable<LedgerDatabase["exchange_rates"]>,
+  "user_id"
+>;
 export type Loan = Selectable<LedgerDatabase["loans"]>;
 
 export const systemAccounts = {

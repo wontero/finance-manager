@@ -508,20 +508,26 @@ export function mcpSpecs(
         expect(await counts()).toEqual(before);
       }, 9_000);
 
-      test("S3: conserva el tipo del mismo día aunque la API cambie el valor", async () => {
+      test("S3: conserva el tipo oficial aunque la API cambie el valor, y respeta el manual", async () => {
         const fecha = "2026-11-26";
         await seedRate(fecha, "11.83", "Carga manual");
         const before = await counts();
         requestQuote.mockImplementation(async () =>
           response({ vigencia_desde: fecha }),
         );
-        expect((await update()).structuredContent).toMatchObject({
+        const initial = (await update()).structuredContent;
+        expect(initial).toMatchObject({
           fecha,
           tipo: "11.8300000000",
-          estado: "existente",
-          fuente: "Carga manual",
-          operationId: null,
+          estado: "creado",
+          fuente: expect.stringContaining("Tipo de cambio oficial BCB"),
+          operationId: expect.any(String),
         });
+        expect((await counts())[0]).toMatchObject({
+          rates: (BigInt(before[0].rates) + 1n).toString(),
+          operations: (BigInt(before[0].operations) + 1n).toString(),
+        });
+        const after = await counts();
         now += 60_000;
         requestQuote.mockImplementation(async () =>
           response({ vigencia_desde: fecha, valor: 11.95 }),
@@ -531,14 +537,14 @@ export function mcpSpecs(
           fecha,
           tipo: "11.8300000000",
           estado: "valor_distinto",
-          fuente: "Carga manual",
+          fuente: initial?.fuente,
           operationId: null,
         });
         expect(JSON.stringify(different.content)).toMatch(/11\.95/);
-        expect(await counts()).toEqual(before);
+        expect(await counts()).toEqual(after);
         expect(
           await rows(
-            "SELECT rate, source FROM exchange_rates WHERE from_currency = 'USD' AND to_currency = 'BOB' AND date = ?",
+            "SELECT rate, source FROM exchange_rates WHERE from_currency = 'USD' AND to_currency = 'BOB' AND date = ? AND user_id = 1",
             [fecha],
           ),
         ).toEqual([{ rate: "11.8300000000", source: "Carga manual" }]);

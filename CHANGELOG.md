@@ -7,12 +7,14 @@ All notable changes to FinanceManager are documented here. The format follows [K
 ### Añadido
 
 - Pantalla de cuentas con saldos y totales por moneda, archivadas y acceso a movimientos filtrados.
+- Esquema y ledger con propiedad por usuario, migración de los datos existentes al usuario #1 y topes contables configurables por usuario.
 - Dashboard web con inicio de sesión, resumen, movimientos con filtros, informes y deshacer desde la actividad.
 - Herramienta MCP `actualizar_tipo_de_cambio_oficial` para registrar el tipo oficial USD/BOB vigente vía CUCU, un tercero sin afiliación al BCB, y conservar las cotizaciones ya registradas para esa fecha.
 
 ### Cambiado
 
 - Las instrucciones del servidor MCP piden respuestas breves y resultados finales sin cálculos intermedios.
+- El tipo oficial USD/BOB se comparte y sirve de respaldo cuando el usuario no tiene un tipo propio aplicable.
 
 ### Corregido
 

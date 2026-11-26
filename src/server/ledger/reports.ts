@@ -182,14 +182,14 @@ export async function findTransactions(
   if (input.from && input.to && input.from > input.to)
     throw new Error("El inicio del rango debe ser anterior o igual al final.");
   const hasCategory = (kind: "income" | "expense") => sql`EXISTS (
-    SELECT 1 FROM postings p JOIN accounts a ON a.id = p.account_id
-    WHERE p.transaction_id = t.id AND a.kind = ${kind}
+    SELECT 1 FROM postings p JOIN accounts a ON a.id = p.account_id AND a.user_id = p.user_id
+    WHERE p.transaction_id = t.id AND p.user_id = t.user_id AND a.kind = ${kind}
   )`;
   const type = sql<TransactionType>`CASE
     WHEN ${hasCategory("expense")} THEN 'gasto'
     WHEN ${hasCategory("income")} THEN 'ingreso'
-    WHEN (SELECT COUNT(DISTINCT p.account_id) FROM postings p JOIN accounts a ON a.id = p.account_id
-          WHERE p.transaction_id = t.id AND a.kind IN ('asset', 'liability')) >= 2 THEN 'transferencia'
+    WHEN (SELECT COUNT(DISTINCT p.account_id) FROM postings p JOIN accounts a ON a.id = p.account_id AND a.user_id = p.user_id
+          WHERE p.transaction_id = t.id AND p.user_id = t.user_id AND a.kind IN ('asset', 'liability')) >= 2 THEN 'transferencia'
     ELSE 'ajuste' END`;
   let query = db
     .selectFrom("transactions as t")

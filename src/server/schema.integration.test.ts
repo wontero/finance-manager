@@ -17,10 +17,15 @@ import { authSpecs } from "./auth-specs.js";
 import { createDatabase } from "./database.js";
 import { createLedger } from "./ledger/index.js";
 import { ledgerSpecs } from "./ledger/ledger-specs.js";
+import { getAccountTotal, getOperations } from "./ledger/queries.js";
+import { getPeriodSummary } from "./ledger/reports.js";
 import type { LedgerDatabase } from "./ledger/schema.js";
 import { mcpSpecs } from "./mcp/mcp-specs.js";
 import * as accountingMigration from "./migrations/202611242020_accounting_schema.js";
 import * as authenticationMigration from "./migrations/202611242230_authentication.js";
+import * as loanMigration from "./migrations/202611250900_loans.js";
+import * as ownershipMigration from "./migrations/202611261200_user_ownership.js";
+import { multiuserSpecs } from "./multiuser-specs.js";
 import {
   checkLocalDataDir,
   localDatabase,
@@ -49,6 +54,7 @@ const tables = [
   "tags",
   "transaction_tags",
   "transactions",
+  "users",
   "web_sessions",
 ];
 const views = [
@@ -73,6 +79,146 @@ let initialMigration: string;
 let legacyIncomeInterest: string;
 let legacyExpenseInterest: { id: string; operationId: string | null };
 let archivedExpenseInterest: string;
+const legacyDate = "1977-11-11";
+const legacyPeriod = {
+  from: legacyDate,
+  to: legacyDate,
+  limit: 100,
+  includeArchived: true,
+};
+const legacyTables = {
+  accounts: "id",
+  transactions: "id",
+  postings: "id",
+  tags: "id",
+  transaction_tags: "transaction_id, tag_id",
+  custom_field_definitions: "id",
+  loans: "id",
+  operations: "seq",
+  audit_log: "id",
+  exchange_rates: "from_currency, to_currency, date, source",
+} as const;
+let legacyCash: string;
+let legacyOperation: string;
+
+async function domainRows(
+  db: ReturnType<typeof createDatabase>["db"],
+  migrated = false,
+) {
+  return Object.fromEntries(
+    await Promise.all(
+      Object.entries(legacyTables).map(async ([table, order]) => {
+        const { rows } = await sql
+          .raw<Record<string, unknown>>(
+            `SELECT * FROM ${table} ORDER BY ${order}`,
+          )
+          .execute(db);
+        return [
+          table,
+          rows.map((row) => {
+            const { user_id, ...values } = row;
+            if (migrated) expect(user_id).toBe("1");
+            if (table === "exchange_rates") {
+              delete values.id;
+              delete values.owner_key;
+              delete values.owner_source;
+            }
+            return values;
+          }),
+        ];
+      }),
+    ),
+  );
+}
+
+async function legacyRead(db: ReturnType<typeof createDatabase>["db"]) {
+  const typed = db.withTables<LedgerDatabase>();
+  return {
+    balance: await getAccountTotal(typed, legacyCash, legacyDate),
+    summary: await getPeriodSummary(typed, legacyPeriod),
+    operations: (await getOperations(typed, 100)).map(
+      ({ id, actor, description, undone }) => ({
+        id,
+        actor,
+        description,
+        undone,
+      }),
+    ),
+  };
+}
+
+async function seedLegacyData(db: ReturnType<typeof createDatabase>["db"]) {
+  const insertId = async (query: ReturnType<typeof sql>) =>
+    (await query.execute(db)).insertId!.toString();
+  const opening = (
+    await sql<{
+      id: string;
+    }>`SELECT id FROM accounts WHERE name = 'Saldos iniciales'`.execute(db)
+  ).rows[0].id;
+  const root = (
+    await sql<{
+      id: string;
+    }>`SELECT id FROM accounts WHERE name = 'Gastos'`.execute(db)
+  ).rows[0].id;
+  legacyCash = await insertId(
+    sql`INSERT INTO accounts (name, kind, subtype, currency) VALUES ('Caja previa', 'asset', 'efectivo', 'BOB')`,
+  );
+  const usd = await insertId(
+    sql`INSERT INTO accounts (name, kind, subtype, currency) VALUES ('Dólares previos', 'asset', 'efectivo', 'USD')`,
+  );
+  const receivable = await insertId(
+    sql`INSERT INTO accounts (name, kind, subtype, currency) VALUES ('Préstamo previo', 'asset', 'por_cobrar', 'BOB')`,
+  );
+  const parent = await insertId(
+    sql`INSERT INTO accounts (name, kind, parent_id) VALUES ('Categoría previa', 'expense', ${root})`,
+  );
+  const category = await insertId(
+    sql`INSERT INTO accounts (name, kind, parent_id) VALUES ('Subcategoría previa', 'expense', ${parent})`,
+  );
+  await sql`INSERT INTO loans (account_id, direction, counterparty, currency, principal, start_date, rate, rate_period)
+    VALUES (${receivable}, 'given', 'Persona de prueba', 'BOB', 4321, ${legacyDate}, 0, 'annual')`.execute(
+    db,
+  );
+  const tag = await insertId(
+    sql`INSERT INTO tags (name) VALUES ('Etiqueta previa')`,
+  );
+  await sql`INSERT INTO custom_field_definitions (entity, \`key\`, label, type) VALUES ('transaction', 'prueba', 'Campo previo', 'text')`.execute(
+    db,
+  );
+  legacyOperation = randomUUID();
+  const undone = randomUUID();
+  const reversal = randomUUID();
+  await sql`INSERT INTO operations (id, actor, description, undoes_operation_id) VALUES
+    (${undone}, 'claude', 'Operación previa deshecha', NULL),
+    (${reversal}, 'web', 'Deshacer operación previa', ${undone}),
+    (${legacyOperation}, 'web', 'Registrar tipo de cambio', NULL)`.execute(db);
+  const entry =
+    await insertId(sql`INSERT INTO transactions (date, description, custom, operation_id)
+    VALUES (${legacyDate}, 'Movimiento previo', '{"prueba":"valor"}', ${legacyOperation})`);
+  await sql`INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES
+    (${entry}, ${legacyCash}, 'BOB', -543), (${entry}, ${category}, 'BOB', 543),
+    (${entry}, ${usd}, 'USD', 1223), (${entry}, ${opening}, 'USD', -1223)`.execute(
+    db,
+  );
+  await sql`INSERT INTO transaction_tags (transaction_id, tag_id) VALUES (${entry}, ${tag})`.execute(
+    db,
+  );
+  const source = "Tipo previo";
+  const quote = {
+    from_currency: "USD",
+    to_currency: "BOB",
+    date: legacyDate,
+    source,
+    rate: "7.0000000000",
+  };
+  await sql`INSERT INTO exchange_rates (from_currency, to_currency, date, source, rate) VALUES ('USD', 'BOB', ${legacyDate}, ${source}, 7)`.execute(
+    db,
+  );
+  await sql`INSERT INTO audit_log (operation_id, table_name, row_id, action, \`after\`) VALUES
+    (${legacyOperation}, 'exchange_rates', ${"USD/BOB/" + legacyDate + "/" + source}, 'insert', ${JSON.stringify(quote)})`.execute(
+    db,
+  );
+}
 
 function connect(settingName: string, database: string) {
   const { pool } = createDatabase({ ...localDatabase(settingName), database });
@@ -131,34 +277,39 @@ beforeAll(async () => {
     });
     const { error } = await prior.migrateToLatest();
     if (error) throw error;
-    const ledger = createLedger(db, "web");
     const accounts = db.withTables<LedgerDatabase>();
     const income = await accounts
       .selectFrom("accounts")
       .select("id")
       .where("kind", "=", "income")
       .executeTakeFirstOrThrow();
-    const archivedIncome = await ledger.createCategory({
-      name: "Intereses",
-      parentId: income.id,
-    });
-    await ledger.archiveAccount({ id: archivedIncome.id });
-    legacyIncomeInterest = archivedIncome.id;
+    const archivedCategory = async (parent: string, kind: string) =>
+      (
+        await sql`INSERT INTO accounts (name, parent_id, kind, archived_at)
+        VALUES ('Intereses', ${parent}, ${kind}, UTC_TIMESTAMP(3))`.execute(db)
+      ).insertId!.toString();
+    legacyIncomeInterest = await archivedCategory(income.id, "income");
     const expense = await accounts
       .selectFrom("accounts")
       .select("id")
       .where("kind", "=", "expense")
       .executeTakeFirstOrThrow();
-    const archived = await ledger.createCategory({
-      name: "Intereses",
-      parentId: expense.id,
-    });
-    await ledger.archiveAccount({ id: archived.id });
-    archivedExpenseInterest = archived.id;
-    legacyExpenseInterest = await ledger.createCategory({
-      name: "intereses",
-      parentId: expense.id,
-    });
+    archivedExpenseInterest = await archivedCategory(expense.id, "expense");
+    const active = await sql`INSERT INTO accounts (name, parent_id, kind)
+      VALUES ('intereses', ${expense.id}, 'expense')`.execute(db);
+    const id = active.insertId!.toString();
+    const operationId = randomUUID();
+    await sql`INSERT INTO operations (id, actor, description) VALUES (${operationId}, 'web', 'Crear categoría')`.execute(
+      db,
+    );
+    const [row] = (
+      await sql`SELECT * FROM accounts WHERE id = ${id}`.execute(db)
+    ).rows;
+    await sql`INSERT INTO audit_log (operation_id, table_name, row_id, action, \`after\`)
+      VALUES (${operationId}, 'accounts', ${id}, 'insert', ${JSON.stringify(row)})`.execute(
+      db,
+    );
+    legacyExpenseInterest = { id, operationId };
   } finally {
     await db.destroy();
   }
@@ -171,11 +322,11 @@ beforeAll(async () => {
   );
   reportingAccount = accounts[0].id;
   await migration.execute(
-    "INSERT INTO operations (id, actor, description) VALUES (?, 'system', 'Prueba M-003')",
+    "INSERT INTO operations (user_id, id, actor, description) VALUES (1, ?, 'system', 'Prueba M-003')",
     [uuid],
   );
   await migration.execute(
-    "INSERT INTO transactions (date, description, operation_id) VALUES ('2026-11-24', 'Prueba M-003', ?)",
+    "INSERT INTO transactions (user_id, date, description, operation_id) VALUES (1, '2026-11-24', 'Prueba M-003', ?)",
     [uuid],
   );
   const [rows] = await migration.execute<RowDataPacket[]>(
@@ -184,6 +335,75 @@ beforeAll(async () => {
   );
   transaction = rows[0].id;
 }, 20_000);
+
+test("M-021 S1: migración reintentable conserva filas, saldos, informes y auditoría reversible", async () => {
+  // Las tablas de esta prueba viven junto a las vistas, separadas de los otros fixtures.
+  const { db } = createDatabase({
+    ...localDatabase("MIGRATION_DATABASE_URL"),
+    database: readOnlySchema,
+  });
+  try {
+    await accountingMigration.up(db);
+    await loanMigration.up(db);
+    await seedLegacyData(db);
+    const before = await domainRows(db);
+    const results = await legacyRead(db);
+    await ownershipMigration.up(db);
+    expect(await domainRows(db, true)).toEqual(before);
+    await ownershipMigration.up(db);
+    expect(await domainRows(db, true)).toEqual(before);
+
+    const ledger = createLedger(db, "web", "1");
+    expect(
+      await ledger.getBalance({ id: legacyCash, date: legacyDate }),
+    ).toEqual({ amount: results.balance, currency: "BOB" });
+    expect(await ledger.getPeriodSummary(legacyPeriod)).toEqual(
+      results.summary,
+    );
+    expect(
+      (await ledger.listOperations({ limit: 100 })).map(
+        ({ id, actor, description, undone }) => ({
+          id,
+          actor,
+          description,
+          undone,
+        }),
+      ),
+    ).toEqual(results.operations);
+    expect(
+      (await ledger.getAccountTree(true)).some(({ name }) => name === "Comida"),
+    ).toBe(false);
+    const { operationId } = await ledger.undoOperation(legacyOperation);
+    expect(
+      (await ledger.listOperations()).find(({ id }) => id === legacyOperation)
+        ?.undone,
+    ).toBe(true);
+    await ledger.undoOperation(operationId);
+    expect(
+      await ledger.getExchangeRate({
+        from: "USD",
+        to: "BOB",
+        date: legacyDate,
+      }),
+    ).toMatchObject({ rate: "7.0000000000" });
+  } finally {
+    try {
+      await db.connection().execute(async (connection) => {
+        await sql`SET FOREIGN_KEY_CHECKS = 0`.execute(connection);
+        try {
+          const tables = [...Object.keys(legacyTables), "currencies", "users"];
+          await sql`DROP TABLE IF EXISTS ${sql.join(tables.map((table) => sql.table(table)))}`.execute(
+            connection,
+          );
+        } finally {
+          await sql`SET FOREIGN_KEY_CHECKS = 1`.execute(connection);
+        }
+      });
+    } finally {
+      await db.destroy();
+    }
+  }
+});
 
 afterAll(async () => {
   reader?.release();
@@ -271,7 +491,7 @@ test("M-008B S13: la migración conserva el ID de la categoría activa o recuper
     database: schema,
   });
   try {
-    const ledger = createLedger(db, "web");
+    const ledger = createLedger(db, "web", "1");
     await expect(
       ledger.undoOperation(legacyExpenseInterest.operationId!),
     ).rejects.toThrow(/No se puede deshacer.*accounts\//i);
@@ -284,7 +504,7 @@ test("S3: audit_log permits inserts and rejects updates and deletes", async () =
   await migration.beginTransaction();
   try {
     await migration.execute(
-      "INSERT INTO audit_log (operation_id, table_name, row_id, action, `after`) VALUES (?, 'transactions', ?, 'insert', '{}')",
+      "INSERT INTO audit_log (user_id, operation_id, table_name, row_id, action, `after`) VALUES (1, ?, 'transactions', ?, 'insert', '{}')",
       [uuid, transaction],
     );
     await expect(
@@ -303,7 +523,7 @@ test("S3: audit_log permits inserts and rejects updates and deletes", async () =
 
 test("S4: rejects zero, unknown currencies and invalid account kinds", async () => {
   const insert =
-    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, ?, ?)";
+    "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, ?, ?)";
   await expect(
     app.execute(insert, [transaction, reportingAccount, "BOB", "0"]),
   ).rejects.toMatchObject({ errno: 4025 });
@@ -311,7 +531,10 @@ test("S4: rejects zero, unknown currencies and invalid account kinds", async () 
     app.execute(insert, [transaction, reportingAccount, "BAD", "1"]),
   ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
   await expect(
-    app.execute("INSERT INTO accounts (name, kind) VALUES (?, 'bad')", [uuid]),
+    app.execute(
+      "INSERT INTO accounts (user_id, name, kind) VALUES (1, ?, 'bad')",
+      [uuid],
+    ),
   ).rejects.toMatchObject({ errno: 1265 });
 });
 
@@ -320,16 +543,16 @@ test("S4: only active siblings must have distinct names, including roots", async
   try {
     await expect(
       app.execute(
-        "INSERT INTO accounts (name, kind) VALUES ('Ingresos', 'income')",
+        "INSERT INTO accounts (user_id, name, kind) VALUES (1, 'Ingresos', 'income')",
       ),
     ).rejects.toMatchObject({ code: "ER_DUP_ENTRY" });
     await app.execute(
-      "INSERT INTO accounts (name, kind, parent_id) VALUES (?, 'equity', ?)",
+      "INSERT INTO accounts (user_id, name, kind, parent_id) VALUES (1, ?, 'equity', ?)",
       [uuid, reportingAccount],
     );
     await expect(
       app.execute(
-        "INSERT INTO accounts (name, kind, parent_id) VALUES (?, 'equity', ?)",
+        "INSERT INTO accounts (user_id, name, kind, parent_id) VALUES (1, ?, 'equity', ?)",
         [uuid, reportingAccount],
       ),
     ).rejects.toMatchObject({ code: "ER_DUP_ENTRY" });
@@ -338,7 +561,7 @@ test("S4: only active siblings must have distinct names, including roots", async
       [uuid],
     );
     await app.execute(
-      "INSERT INTO accounts (name, kind, parent_id) VALUES (?, 'equity', ?), (?, 'equity', NULL)",
+      "INSERT INTO accounts (user_id, name, kind, parent_id) VALUES (1, ?, 'equity', ?), (1, ?, 'equity', NULL)",
       [uuid, reportingAccount, uuid],
     );
   } finally {
@@ -353,8 +576,8 @@ test("S5: the Kysely connection round-trips BIGINT without rounding", async () =
   });
   try {
     await db.transaction().execute(async (trx) => {
-      await sql`INSERT INTO postings (transaction_id, account_id, currency, amount)
-        VALUES (${transaction}, ${reportingAccount}, 'BOB', ${"9007199254740993"})`.execute(
+      await sql`INSERT INTO postings (user_id, transaction_id, account_id, currency, amount)
+        VALUES (1, ${transaction}, ${reportingAccount}, 'BOB', ${"9007199254740993"})`.execute(
         trx,
       );
       const result = await sql<{
@@ -379,8 +602,8 @@ test("S6: DECIMAL retains the exact exchange rate", async () => {
   });
   try {
     await db.transaction().execute(async (trx) => {
-      await sql`INSERT INTO exchange_rates (date, from_currency, to_currency, rate, source)
-        VALUES ('2026-11-24', 'USD', 'BOB', ${"6.9612345678"}, ${uuid})`.execute(
+      await sql`INSERT INTO exchange_rates (user_id, date, from_currency, to_currency, rate, source)
+        VALUES (1, '2026-11-24', 'USD', 'BOB', ${"6.9612345678"}, ${uuid})`.execute(
         trx,
       );
       const result = await sql<{
@@ -416,7 +639,7 @@ test("S7: the reader can select only from the views and cannot write or create",
 
 test("S8: soft-deleted transactions and their postings disappear from the views", async () => {
   await app.execute(
-    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', 1)",
+    "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', 1)",
     [transaction, reportingAccount],
   );
   try {
@@ -453,7 +676,7 @@ test("S8: soft-deleted transactions and their postings disappear from the views"
 test("S9: only active custom definitions are visible and raw JSON and audit are private", async () => {
   const archived = `archived_${uuid}`;
   await app.execute(
-    "INSERT INTO custom_field_definitions (entity, `key`, label, type, archived_at) VALUES ('transaction', ?, 'Activa', 'text', NULL), ('transaction', ?, 'Archivada', 'text', CURRENT_TIMESTAMP)",
+    "INSERT INTO custom_field_definitions (user_id, entity, `key`, label, type, archived_at) VALUES (1, 'transaction', ?, 'Activa', 'text', NULL), (1, 'transaction', ?, 'Archivada', 'text', CURRENT_TIMESTAMP)",
     [uuid, archived],
   );
   try {
@@ -502,7 +725,7 @@ test("the migration user can create and drop in finance_test but cannot read mys
 test("S13: each pooled connection applies strict SQL mode and UTC", async () => {
   const overflow = "9223372036854775808";
   const posting =
-    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)";
+    "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', ?)";
   const raw = await createConnection({
     ...localDatabase("DATABASE_URL"),
     database: schema,
@@ -515,7 +738,7 @@ test("S13: each pooled connection applies strict SQL mode and UTC", async () => 
       expect.objectContaining({ Code: 1264 }),
     ]);
     await raw.execute(
-      "INSERT INTO operations (id, actor, description) VALUES (?, 'invalid', 'Prueba S13')",
+      "INSERT INTO operations (user_id, id, actor, description) VALUES (1, ?, 'invalid', 'Prueba S13')",
       [randomUUID()],
     );
     expect((await raw.query("SHOW WARNINGS"))[0]).toEqual([
@@ -555,8 +778,8 @@ test("S13: each pooled connection applies strict SQL mode and UTC", async () => 
         .execute(posting, [transaction, reportingAccount, overflow]),
     ).rejects.toMatchObject({ errno: 1264 });
     await expect(
-      sql`INSERT INTO operations (id, actor, description)
-        VALUES (${randomUUID()}, 'invalid', 'Prueba S13')`.execute(db),
+      sql`INSERT INTO operations (user_id, id, actor, description)
+        VALUES (1, ${randomUUID()}, 'invalid', 'Prueba S13')`.execute(db),
     ).rejects.toMatchObject({ errno: 1265 });
     for (const client of [reader, migration]) {
       const [rows] = await client.query("SELECT @@session.time_zone AS tz");
@@ -626,7 +849,7 @@ test("S22: releasing and reacquiring the same connection preserves the session",
 
 test("S15: each subtype is accepted only for its account kind", async () => {
   const insert =
-    "INSERT INTO accounts (name, kind, subtype, currency) VALUES (?, ?, ?, 'BOB')";
+    "INSERT INTO accounts (user_id, name, kind, subtype, currency) VALUES (1, ?, ?, ?, 'BOB')";
   await app.beginTransaction();
   try {
     for (const [kind, subtype] of [
@@ -658,7 +881,7 @@ test("S16: operations in the same millisecond have insertion order and a single 
   const first = "ffffffff-ffff-ffff-ffff-ffffffffffff";
   const second = "00000000-0000-0000-0000-000000000001";
   const insert =
-    "INSERT INTO operations (id, actor, description, undoes_operation_id, created_at) VALUES (?, 'web', 'Prueba S16', ?, '2026-11-24 12:34:56.123')";
+    "INSERT INTO operations (user_id, id, actor, description, undoes_operation_id, created_at) VALUES (1, ?, 'web', 'Prueba S16', ?, '2026-11-24 12:34:56.123')";
   await app.beginTransaction();
   try {
     await app.execute(insert, [first, null]);
@@ -679,7 +902,7 @@ test("S16: operations in the same millisecond have insertion order and a single 
 test("S17: same-currency rates are rejected and timestamps accept 2040 with milliseconds", async () => {
   await expect(
     app.execute(
-      "INSERT INTO exchange_rates (date, from_currency, to_currency, rate, source) VALUES ('2040-01-01', 'BOB', 'BOB', 1, 'Prueba S17')",
+      "INSERT INTO exchange_rates (user_id, date, from_currency, to_currency, rate, source) VALUES (1, '2040-01-01', 'BOB', 'BOB', 1, 'Prueba S17')",
     ),
   ).rejects.toMatchObject({ errno: 4025 });
   await app.beginTransaction();
@@ -726,12 +949,14 @@ test("S18: reporting shows archived accounts, posting details and active transac
     [reportingAccount],
   );
   await app.execute(
-    "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', 1)",
+    "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', 1)",
     [transaction, reportingAccount],
   );
-  await app.execute("INSERT INTO tags (name) VALUES ('Prueba S18')");
   await app.execute(
-    "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Prueba S18'",
+    "INSERT INTO tags (user_id, name) VALUES (1, 'Prueba S18')",
+  );
+  await app.execute(
+    "INSERT INTO transaction_tags (user_id, transaction_id, tag_id) SELECT 1, ?, id FROM tags WHERE name = 'Prueba S18'",
     [transaction],
   );
   try {
@@ -898,17 +1123,19 @@ SH
       await migration.query(
         "CREATE TRIGGER restore_fixture_trigger BEFORE INSERT ON tags FOR EACH ROW SET NEW.name = CONCAT(NEW.name, '!')",
       );
-      await migration.query("INSERT INTO tags (name) VALUES ('Ida y vuelta')");
+      await migration.query(
+        "INSERT INTO tags (user_id, name) VALUES (1, 'Ida y vuelta')",
+      );
       await migration.execute(
-        "INSERT INTO transaction_tags SELECT ?, id FROM tags WHERE name = 'Ida y vuelta!'",
+        "INSERT INTO transaction_tags (user_id, transaction_id, tag_id) SELECT 1, ?, id FROM tags WHERE name = 'Ida y vuelta!'",
         [transaction],
       );
       await migration.execute(
-        "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BOB', ?)",
+        "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BOB', ?)",
         [transaction, reportingAccount, "9007199254740993"],
       );
       await migration.execute(
-        "INSERT INTO audit_log (operation_id, table_name, row_id, action, `after`) VALUES (?, 'transactions', ?, 'insert', '{}')",
+        "INSERT INTO audit_log (user_id, operation_id, table_name, row_id, action, `after`) VALUES (1, ?, 'transactions', ?, 'insert', '{}')",
         [uuid, transaction],
       );
       await migration.execute(
@@ -963,9 +1190,13 @@ SH
           ])
         )[0],
       ).toHaveLength(1);
-      expect((await migration.query("SELECT name FROM tags"))[0]).toEqual([
-        { name: "Ida y vuelta!" },
-      ]);
+      expect(
+        (
+          await migration.query(
+            "SELECT name FROM tags WHERE name = 'Ida y vuelta!'",
+          )
+        )[0],
+      ).toEqual([{ name: "Ida y vuelta!" }]);
       await expect(
         migration.query("DELETE FROM audit_log"),
       ).rejects.toMatchObject({
@@ -973,7 +1204,7 @@ SH
       });
       await expect(
         migration.execute(
-          "INSERT INTO postings (transaction_id, account_id, currency, amount) VALUES (?, ?, 'BAD', 1)",
+          "INSERT INTO postings (user_id, transaction_id, account_id, currency, amount) VALUES (1, ?, ?, 'BAD', 1)",
           [transaction, reportingAccount],
         ),
       ).rejects.toMatchObject({ code: "ER_NO_REFERENCED_ROW_2" });
@@ -1010,4 +1241,5 @@ test.skipIf(
 ledgerSpecs(() => ({ migration, reader }));
 authSpecs(() => ({ app, reader }));
 mcpSpecs(() => migration, schema, readOnlySchema);
+multiuserSpecs(schema);
 dashboardSpecs(schema);

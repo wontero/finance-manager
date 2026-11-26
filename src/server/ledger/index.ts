@@ -2,6 +2,7 @@ import {
   actorInput,
   ledgerInputs,
   parseLedgerInput,
+  rowId,
   todayLaPaz,
   type LedgerInput,
 } from "@finance-manager/core";
@@ -9,7 +10,12 @@ import type { Kysely, Transaction } from "kysely";
 import type { z } from "zod";
 import * as accounts from "./accounts.js";
 import { utcStamp, writeLedger, type LedgerWrite } from "./audit.js";
-import { findExchangeRate, saveExchangeRate } from "./metadata.js";
+import {
+  findExchangeRate,
+  saveExchangeRate,
+  saveOfficialRate,
+} from "./metadata.js";
+import { ledgerLimits, type LedgerLimits } from "./limits.js";
 import * as loans from "./loans.js";
 import {
   getAccountTotal,
@@ -22,9 +28,20 @@ import type { Actor, ExchangeRate, LedgerDatabase } from "./schema.js";
 import * as dashboard from "./dashboard.js";
 import * as reports from "./reports.js";
 import * as entries from "./transactions.js";
+import { userScope } from "./user-scope.js";
 
-export function createLedger(database: Kysely<unknown>, actor: Actor) {
-  const db = database.withTables<LedgerDatabase>();
+export { provisionUser } from "./provision.js";
+
+export function createLedger(
+  database: Kysely<unknown>,
+  actor: Actor,
+  id: string,
+  limits: LedgerLimits = ledgerLimits(),
+) {
+  const userId = parseLedgerInput(rowId, id);
+  const db = database
+    .withTables<LedgerDatabase>()
+    .withPlugin(userScope(userId));
   const writer = parseLedgerInput(actorInput, actor);
   const mutate =
     <Schema extends z.ZodType, Result>(
@@ -34,7 +51,9 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
     ) =>
     async (input: z.input<Schema>) => {
       const value = parseLedgerInput(schema, input);
-      return writeLedger(db, writer, description, (write) => run(write, value));
+      return writeLedger(db, userId, limits, writer, description, (write) =>
+        run(write, value),
+      );
     };
   const read = <Result>(
     run: (trx: Transaction<LedgerDatabase>) => Promise<Result>,
@@ -149,11 +168,22 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         actualBalance,
         date,
       });
-      return writeLedger(db, writer, "Conciliar cuenta", (write) =>
-        accounts.reconcile(write, input),
+      return writeLedger(
+        db,
+        userId,
+        limits,
+        writer,
+        "Conciliar cuenta",
+        (write) => accounts.reconcile(write, input),
       );
     },
     recordExchangeRate,
+    recordOfficialRate: mutate(
+      ledgerInputs.recordExchangeRate.omit({ ifAbsent: true }),
+      "Registrar tipo de cambio oficial",
+      (write, { from, to, date, source, rate }) =>
+        saveOfficialRate(write, from, to, date ?? todayLaPaz(), source, rate),
+    ),
     defineCustomField: mutate(
       ledgerInputs.defineCustomField,
       "Definir campo personalizado",
@@ -200,8 +230,13 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         ledgerInputs.batchOptions,
         options,
       );
-      return writeLedger(db, writer, "Importar lote de asientos", (write) =>
-        entries.importEntries(write, batch, duplicates),
+      return writeLedger(
+        db,
+        userId,
+        limits,
+        writer,
+        "Importar lote de asientos",
+        (write) => entries.importEntries(write, batch, duplicates),
       );
     },
     async undoOperation(operationId: string) {
@@ -210,6 +245,8 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       });
       return writeLedger(
         db,
+        userId,
+        limits,
         writer,
         `Deshacer operación ${id}`,
         (write) => write.undo(id),
@@ -222,7 +259,7 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
         to,
         date = todayLaPaz(),
       } = parseLedgerInput(ledgerInputs.getExchangeRate, input);
-      const rate = await findExchangeRate(db, from, to, date);
+      const rate = await read((trx) => findExchangeRate(trx, from, to, date));
       if (!rate)
         throw new Error(`Sin tipo de cambio de ${from} a ${to} al ${date}.`);
       return rate;
@@ -283,7 +320,7 @@ export function createLedger(database: Kysely<unknown>, actor: Actor) {
       input: Parameters<typeof dashboard.dashboardTransactions>[1],
     ) => read((trx) => dashboard.dashboardTransactions(trx, input)),
     dashboardOperations: (limit: number, before?: string) =>
-      read((trx) => dashboard.dashboardOperations(trx, limit, before)),
+      read((trx) => dashboard.dashboardOperations(trx, userId, limit, before)),
     getAccountTree: (includeArchived: boolean) =>
       reports.getAccountTree(db, includeArchived),
     listAccountBalances: (ids: string[], date: string) =>

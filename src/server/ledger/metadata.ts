@@ -1,7 +1,7 @@
 import { accountingDate, parseRate } from "@finance-manager/core";
 import { sql, type Kysely } from "kysely";
 import type { LedgerWrite } from "./audit.js";
-import type { LedgerDatabase } from "./schema.js";
+import type { ExchangeRate, LedgerDatabase } from "./schema.js";
 
 export async function validateCustom(
   db: Kysely<LedgerDatabase>,
@@ -75,7 +75,7 @@ export async function setTags(
       });
 }
 
-export function findExchangeRate(
+function findUserRate(
   db: Kysely<LedgerDatabase>,
   from: string,
   to: string,
@@ -83,7 +83,7 @@ export function findExchangeRate(
 ) {
   return db
     .selectFrom("exchange_rates")
-    .selectAll()
+    .select(["from_currency", "to_currency", "date", "source", "rate"])
     .where("from_currency", "=", from)
     .where("to_currency", "=", to)
     .where("date", "<=", date)
@@ -91,6 +91,82 @@ export function findExchangeRate(
     .orderBy(sql`BINARY source = 'BCB referencial venta'`, "desc")
     .orderBy("source")
     .executeTakeFirst();
+}
+
+async function findOfficialRate(
+  db: Kysely<LedgerDatabase>,
+  from: string,
+  to: string,
+  date: string,
+): Promise<ExchangeRate | undefined> {
+  const {
+    rows: [rate],
+  } =
+    await sql<ExchangeRate>`SELECT from_currency, to_currency, date, source, rate
+    FROM exchange_rates WHERE user_id IS NULL
+      AND from_currency = ${from} AND to_currency = ${to} AND date <= ${date}
+    ORDER BY date DESC LIMIT 1`.execute(db);
+  return rate;
+}
+
+export async function findExchangeRate(
+  db: Kysely<LedgerDatabase>,
+  from: string,
+  to: string,
+  date: string,
+) {
+  return (
+    (await findUserRate(db, from, to, date)) ??
+    findOfficialRate(db, from, to, date)
+  );
+}
+
+async function validateRate(
+  db: Kysely<LedgerDatabase>,
+  from: string,
+  to: string,
+  rate: string,
+) {
+  parseRate(rate);
+  if (from === to)
+    throw new Error("El tipo de cambio requiere dos monedas distintas.");
+  const currencies = await db
+    .selectFrom("currencies")
+    .select("code")
+    .where("code", "in", [from, to])
+    .execute();
+  if (currencies.length !== 2)
+    throw new Error("Una moneda del tipo de cambio no existe.");
+}
+
+export async function saveOfficialRate(
+  write: LedgerWrite,
+  from: string,
+  to: string,
+  date: string,
+  source: string,
+  rate: string,
+) {
+  // Distintos usuarios comparten el mismo tipo oficial y su alta es única.
+  await write.db
+    .selectFrom("currencies")
+    .select("code")
+    .where("code", "=", from)
+    .forUpdate()
+    .executeTakeFirst();
+  await validateRate(write.db, from, to, rate);
+  const existing = await findOfficialRate(write.db, from, to, date);
+  if (existing?.date === date) return { rate: existing, operationId: null };
+  await sql`INSERT INTO exchange_rates (user_id, from_currency, to_currency, date, source, rate)
+    VALUES (NULL, ${from}, ${to}, ${date}, ${source}, ${rate})`.execute(
+    write.db,
+  );
+  const saved = await findOfficialRate(write.db, from, to, date);
+  if (!saved)
+    throw new Error(
+      "No se encontró el tipo de cambio oficial recién registrado.",
+    );
+  return { rate: saved, operationId: await write.recordOfficialRate(saved) };
 }
 
 export async function saveExchangeRate(
@@ -102,20 +178,11 @@ export async function saveExchangeRate(
   rate: string,
   ifAbsent?: true,
 ) {
-  parseRate(rate);
+  await validateRate(write.db, from, to, rate);
   if (ifAbsent) {
-    const existing = await findExchangeRate(write.db, from, to, date);
+    const existing = await findUserRate(write.db, from, to, date);
     if (existing?.date === date) return { rate: existing, operationId: null };
   }
-  if (from === to)
-    throw new Error("El tipo de cambio requiere dos monedas distintas.");
-  const currencies = await write.db
-    .selectFrom("currencies")
-    .select("code")
-    .where("code", "in", [from, to])
-    .execute();
-  if (currencies.length !== 2)
-    throw new Error("Una moneda del tipo de cambio no existe.");
   const previous = await write.db
     .selectFrom("exchange_rates")
     .select("source")
@@ -130,8 +197,23 @@ export async function saveExchangeRate(
     date,
     source: previous?.source ?? source,
   };
-  const value = previous
+  const {
+    from_currency,
+    to_currency,
+    date: savedDate,
+    source: savedSource,
+    rate: savedRate,
+  } = previous
     ? await write.update("exchange_rates", key, { rate })
     : await write.insert("exchange_rates", { ...key, rate });
-  return { rate: value, operationId: await write.operation() };
+  return {
+    rate: {
+      from_currency,
+      to_currency,
+      date: savedDate,
+      source: savedSource,
+      rate: savedRate,
+    },
+    operationId: await write.operation(),
+  };
 }

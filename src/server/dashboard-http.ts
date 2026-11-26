@@ -14,6 +14,7 @@ import type { AuthDb } from "./auth-store.js";
 import { UndoConflict } from "./ledger/audit.js";
 import { shiftMonth } from "./ledger/dashboard.js";
 import { createLedger } from "./ledger/index.js";
+import { legacyUserId } from "./ledger/provision.js";
 import { webSession } from "./web-session.js";
 
 export const dashboardHeaders = {
@@ -70,10 +71,14 @@ function ordered({ from, to }: { from?: string; to?: string }) {
   return !from || !to || from <= to;
 }
 
-export function dashboardApi(config: AuthConfig, db?: AuthDb) {
+export function dashboardApi(
+  config: AuthConfig,
+  db?: AuthDb,
+  userId = legacyUserId,
+) {
   const router = express.Router({ strict: true });
   const session = webSession(config.issuer.protocol === "https:");
-  const ledger = db && createLedger(db, "web");
+  const ledger = db && createLedger(db, "web", userId);
   const authenticated: DashboardSession = { authenticated: true };
 
   router.use((request, response, next) => {

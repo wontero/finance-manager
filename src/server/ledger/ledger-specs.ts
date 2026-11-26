@@ -33,6 +33,10 @@ export function ledgerSpecs(
       rows("SELECT * FROM postings WHERE transaction_id = ? ORDER BY id", [id]);
     const audit = (id: string) =>
       rows("SELECT * FROM audit_log WHERE operation_id = ? ORDER BY id", [id]);
+    const snapshot = ({ user_id, ...row }: RowDataPacket) => {
+      expect(user_id).toBe("1");
+      return row;
+    };
     const category = async (parentId = expenses) =>
       (await ledger.createCategory({ name: name("Categoría"), parentId })).id;
     const account = async (currency = "BOB") =>
@@ -89,7 +93,7 @@ export function ledgerSpecs(
         ...localDatabase("DATABASE_URL"),
         database: "finance_test",
       }).db;
-      ledger = createLedger(db, "web");
+      ledger = createLedger(db, "web", "1");
       const system = Object.fromEntries(
         (await rows("SELECT id, name FROM accounts WHERE is_system")).map(
           (row) => [row.name, row.id as string],
@@ -176,8 +180,8 @@ export function ledgerSpecs(
       expect(
         log.map((row) => [row.action, row.before, JSON.parse(row.after)]),
       ).toEqual([
-        ["insert", null, (await transactions(result.id))[0]],
-        ...lines.map((line) => ["insert", null, line]),
+        ["insert", null, snapshot((await transactions(result.id))[0])],
+        ...lines.map((line) => ["insert", null, snapshot(line)]),
       ]);
     });
 
@@ -378,12 +382,12 @@ export function ledgerSpecs(
         log
           .filter((row) => row.action === "delete")
           .map((row) => JSON.parse(row.before)),
-      ).toEqual(original);
+      ).toEqual(original.map(snapshot));
       expect(
         log
           .filter((row) => row.action === "insert")
           .map((row) => JSON.parse(row.after)),
-      ).toEqual(lines);
+      ).toEqual(lines.map(snapshot));
       const invalid = draft("4").lines;
       invalid[0].amount = "3";
       const countsBefore = await counts();
@@ -759,7 +763,7 @@ export function ledgerSpecs(
       expect(links).toHaveLength(2);
       expect(links[0]).toEqual(links[1]);
       expect(
-        await rows("SELECT * FROM tags WHERE id = ?", [links[0].tag_id]),
+        await rows("SELECT id, name FROM tags WHERE id = ?", [links[0].tag_id]),
       ).toEqual([{ id: links[0].tag_id, name: "Viaje" }]);
       await ledger.archiveCustomField({ id: options.id });
       await expect(
@@ -871,13 +875,18 @@ export function ledgerSpecs(
         ...draft("74"),
         tags: ["viaje"],
       });
-      const [tag] = await rows("SELECT * FROM tags WHERE name = 'Viaje'");
+      const [tag] = await rows(
+        "SELECT id, name FROM tags WHERE name = 'Viaje'",
+      );
       const undid = await ledger.undoOperation(batch.operationId!);
       expect(undid).toMatchObject({ retainedTags: [tag] });
       for (const id of batch.created)
         expect(await transactions(id)).toEqual([]);
       expect(
-        await rows("SELECT * FROM transaction_tags WHERE tag_id = ?", [tag.id]),
+        await rows(
+          "SELECT transaction_id, tag_id FROM transaction_tags WHERE tag_id = ?",
+          [tag.id],
+        ),
       ).toEqual([{ transaction_id: later.id, tag_id: tag.id }]);
       const redid = await ledger.undoOperation(undid.operationId);
       for (const id of batch.created) {
@@ -892,9 +901,9 @@ export function ledgerSpecs(
       await ledger.undoOperation(redid.operationId);
       for (const id of batch.created)
         expect(await transactions(id)).toEqual([]);
-      expect(await rows("SELECT * FROM tags WHERE id = ?", [tag.id])).toEqual([
-        tag,
-      ]);
+      expect(
+        await rows("SELECT id, name FROM tags WHERE id = ?", [tag.id]),
+      ).toEqual([tag]);
     });
 
     test("S22: a later posting identifies the operation that blocks undo", async () => {
@@ -929,7 +938,7 @@ export function ledgerSpecs(
       const tag = JSON.parse(tagInsert.after);
       const undo = await ledger.undoOperation(created.operationId);
       await connections().migration.execute(
-        "INSERT INTO tags (id, name) VALUES (?, ?)",
+        "INSERT INTO tags (user_id, id, name) VALUES (1, ?, ?)",
         [tag.id, tag.name],
       );
       const redo = await ledger.undoOperation(undo.operationId);
@@ -941,9 +950,9 @@ export function ledgerSpecs(
       ).toEqual([{ tag_id: tag.id }]);
       await ledger.undoOperation(redo.operationId);
       expect(await transactions(created.id)).toEqual([]);
-      expect(await rows("SELECT * FROM tags WHERE id = ?", [tag.id])).toEqual([
-        tag,
-      ]);
+      expect(
+        await rows("SELECT id, name FROM tags WHERE id = ?", [tag.id]),
+      ).toEqual([tag]);
     });
 
     test("S22: a later tag association identifies the operation that blocks undo", async () => {

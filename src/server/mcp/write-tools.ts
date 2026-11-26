@@ -470,11 +470,10 @@ export function registerWrites(server: ToolServer, ledger: Ledger) {
     "write",
     async () => {
       const quote = await getOfficialRate();
-      const { rate, operationId } = await ledger.recordExchangeRate({
+      const { rate, operationId } = await ledger.recordOfficialRate({
         ...quote,
         from: "USD",
         to: "BOB",
-        ifAbsent: true,
       });
       const data = { ...showRate(rate), operationId };
       if (operationId)

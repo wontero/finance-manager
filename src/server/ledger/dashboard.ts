@@ -399,6 +399,7 @@ function changeDetail(
       ![
         "id",
         "operation_id",
+        "user_id",
         "created_at",
         "updated_at",
         "is_system",
@@ -439,6 +440,7 @@ function changeDetail(
 
 export async function dashboardOperations(
   db: Transaction<LedgerDatabase>,
+  userId: string,
   limit: number,
   before?: string,
 ): Promise<Page<DashboardOperation>> {
@@ -468,7 +470,7 @@ export async function dashboardOperations(
     log.push(row);
     logByOperation.set(row.operation_id, log);
   }
-  const planner = new LedgerWrite(db, "web", "", null);
+  const planner = new LedgerWrite(db, userId, "web", "", null);
   const operations: DashboardOperation[] = [];
   for (const entry of rows) {
     const { id, actor, description, created_at, undone } = entry;

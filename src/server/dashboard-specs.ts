@@ -62,7 +62,7 @@ export function dashboardSpecs(schema: string) {
       api,
       login,
       session,
-      ledger: createLedger(connection.db, "claude"),
+      ledger: createLedger(connection.db, "claude", "1"),
     };
   }
 

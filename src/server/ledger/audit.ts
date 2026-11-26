@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { todayLaPaz } from "@finance-manager/core";
 import {
   sql,
   type Insertable,
@@ -8,7 +9,13 @@ import {
   type Transaction,
 } from "kysely";
 import { archivedAccountWithBalance, getAccountTotal } from "./queries.js";
-import { systemAccounts, type Actor, type LedgerDatabase } from "./schema.js";
+import {
+  systemAccounts,
+  type Actor,
+  type ExchangeRate,
+  type LedgerDatabase,
+} from "./schema.js";
+import type { LedgerLimits } from "./limits.js";
 
 const primaryKeys = {
   accounts: ["id"],
@@ -61,6 +68,10 @@ function rowId<T extends Table>(table: T, row: Key<T>) {
 function snapshot(row: object) {
   const values = { ...row } as Snapshot;
   delete values.active_parent_id;
+  delete values.user_id;
+  delete values.owner_key;
+  delete values.owner_source;
+  if ("from_currency" in values) delete values.id;
   return values;
 }
 
@@ -102,8 +113,8 @@ function uniqueKeys(table: Table, row: Snapshot | null): SqlValues[] {
   }
 }
 
-export function utcStamp() {
-  return new Date().toISOString().slice(0, 23).replace("T", " ");
+export function utcStamp(now = new Date()) {
+  return now.toISOString().slice(0, 23).replace("T", " ");
 }
 
 export class UndoConflict extends Error {}
@@ -113,9 +124,11 @@ export class LedgerWrite {
 
   constructor(
     readonly db: Transaction<LedgerDatabase>,
+    readonly userId: string,
     private readonly actor: Actor,
     private readonly description: string,
     private readonly undoes: string | null,
+    private readonly limits?: LedgerLimits,
   ) {}
 
   private async record(
@@ -128,6 +141,7 @@ export class LedgerWrite {
     await this.db
       .insertInto("audit_log")
       .values({
+        user_id: this.userId,
         operation_id: await this.operation(),
         table_name: table,
         row_id: id,
@@ -138,6 +152,17 @@ export class LedgerWrite {
       .execute();
   }
 
+  async recordOfficialRate(rate: ExchangeRate) {
+    await this.record(
+      "exchange_rates",
+      "oficial/" + rowId("exchange_rates", rate),
+      "insert",
+      null,
+      { ...rate, user_id: null },
+    );
+    return this.operation();
+  }
+
   async operation() {
     if (this.operationId === null) {
       const id = randomUUID();
@@ -145,6 +170,7 @@ export class LedgerWrite {
         .insertInto("operations")
         .values({
           id,
+          user_id: this.userId,
           actor: this.actor,
           description: this.description,
           undoes_operation_id: this.undoes,
@@ -159,13 +185,14 @@ export class LedgerWrite {
     const {
       rows: [row],
     } = await sql<Row<T>>`SELECT * FROM ${sql.table(table)}
-      WHERE ${where(table, key)} ${lock ? sql`FOR UPDATE` : sql``}`.execute(
+      WHERE user_id = ${this.userId} AND ${where(table, key)} ${lock ? sql`FOR UPDATE` : sql``}`.execute(
       this.db,
     );
     return row;
   }
 
   private async insertRow<T extends Table>(table: T, values: SqlValues) {
+    values = { ...values, user_id: this.userId };
     const keys = Object.keys(values);
     const { insertId } = await sql`INSERT INTO ${sql.table(table)}
       (${sql.join(keys.map((key) => sql.ref(key)))})
@@ -189,9 +216,46 @@ export class LedgerWrite {
 
   async insert<T extends Table>(
     table: T,
-    values: Insertable<LedgerDatabase[T]>,
+    values: Omit<Insertable<LedgerDatabase[T]>, "user_id">,
   ) {
-    return this.insertRow(table, values as SqlValues);
+    let fields = values as SqlValues;
+    if (
+      this.limits &&
+      (table === "accounts" || table === "tags" || table === "transactions")
+    ) {
+      const now = new Date();
+      const start = todayLaPaz(now) + " 04:00:00";
+      const limit =
+        table === "transactions"
+          ? this.limits.dailyTransactions
+          : table === "accounts"
+            ? this.limits.accounts
+            : this.limits.tags;
+      const withinDay =
+        table === "transactions"
+          ? sql`AND created_at >= ${start} AND created_at < DATE_ADD(${start}, INTERVAL 1 DAY)`
+          : sql``;
+      const {
+        rows: [row],
+      } = await sql<{
+        count: string;
+      }>`SELECT COUNT(*) AS count FROM ${sql.table(table)}
+        WHERE user_id = ${this.userId} ${withinDay}`.execute(this.db);
+      if (Number(row.count) >= limit) {
+        const label =
+          table === "transactions"
+            ? "movimientos nuevos por día"
+            : table === "accounts"
+              ? "cuentas y categorías"
+              : "etiquetas";
+        throw new Error(
+          `Se alcanzó el límite de ${limit} ${label} por usuario.`,
+        );
+      }
+      if (table === "transactions")
+        fields = { ...fields, created_at: utcStamp(now) };
+    }
+    return this.insertRow(table, fields);
   }
 
   private async updateRow<T extends Table>(
@@ -205,7 +269,9 @@ export class LedgerWrite {
       Object.entries(values).map(
         ([column, value]) => sql`${sql.ref(column)} = ${value}`,
       ),
-    )} WHERE ${where(table, key)}`.execute(this.db);
+    )} WHERE user_id = ${this.userId} AND ${where(table, key)}`.execute(
+      this.db,
+    );
     const after = await this.row(table, key);
     if (!after)
       throw new Error(`No se encontró la fila actualizada en ${table}.`);
@@ -222,7 +288,7 @@ export class LedgerWrite {
   async update<T extends Table>(
     table: T,
     key: Key<T>,
-    values: Partial<Row<T>>,
+    values: Partial<Omit<Row<T>, "user_id">>,
   ) {
     return this.updateRow(table, key, values as SqlValues);
   }
@@ -230,7 +296,7 @@ export class LedgerWrite {
   async delete<T extends Table>(table: T, key: Key<T>) {
     const before = await this.row(table, key);
     if (!before) throw new Error(`No existe ${table}/${rowId(table, key)}.`);
-    await sql`DELETE FROM ${sql.table(table)} WHERE ${where(table, key)}`.execute(
+    await sql`DELETE FROM ${sql.table(table)} WHERE user_id = ${this.userId} AND ${where(table, key)}`.execute(
       this.db,
     );
     await this.record(
@@ -338,7 +404,7 @@ export class LedgerWrite {
         const blocker = await audit
           .where(
             sql<boolean>`EXISTS (SELECT 1 FROM ${sql.table(child)} AS r
-              WHERE ${ref} = ${rowId} AND ${rowKey} = a.row_id)`,
+              WHERE r.user_id = ${this.userId} AND ${ref} = ${rowId} AND ${rowKey} = a.row_id)`,
           )
           .where("a.table_name", "=", child)
           .where(sql<boolean>`JSON_VALUE(a.after, ${path}) = ${rowId}`)
@@ -413,7 +479,7 @@ export class LedgerWrite {
       if (current.some((value) => isDeepStrictEqual(value, key))) continue;
       // Las filas ya restauradas tienen las claves que convivían con esta en la bitácora.
       const { rows } = await sql`SELECT id FROM ${sql.table(table)}
-        WHERE id NOT IN (${sql.join([rowId, ...earlier])})
+        WHERE user_id = ${this.userId} AND id NOT IN (${sql.join([rowId, ...earlier])})
         AND ${sql.join(
           Object.entries(key).map(
             ([column, value]) => sql`${sql.ref(column)} = ${value}`,
@@ -541,7 +607,9 @@ export class LedgerWrite {
           ) {
             const { rows } =
               await sql<SqlValues>`SELECT * FROM ${sql.table(child)}
-              WHERE ${sql.ref(column)} = ${change.rowId}`.execute(this.db);
+              WHERE user_id = ${this.userId} AND ${sql.ref(column)} = ${change.rowId}`.execute(
+                this.db,
+              );
             if (
               rows.some((row) => {
                 const key =
@@ -596,6 +664,10 @@ export class LedgerWrite {
       const table = item.table_name as Table;
       const before = parseSnapshot(item.before);
       const after = parseSnapshot(item.after);
+      if (table === "exchange_rates" && after?.user_id === null)
+        throw new UndoConflict(
+          "El tipo de cambio oficial compartido no se puede deshacer.",
+        );
       const key = (after ?? before) as Key<Table>;
       if (!key || rowId(table, key) !== item.row_id)
         throw new UndoConflict(
@@ -621,7 +693,7 @@ export class LedgerWrite {
   }
 
   private async applyUndo(changes: Reversal[], seq: string) {
-    const retainedTags: Row<"tags">[] = [];
+    const retainedTags: Omit<Row<"tags">, "user_id">[] = [];
     for (const change of changes) {
       const { table, key, before, after, rowId } = change;
       try {
@@ -668,6 +740,8 @@ export class LedgerWrite {
 
 export async function writeLedger<T>(
   db: Kysely<LedgerDatabase>,
+  userId: string,
+  limits: LedgerLimits,
   actor: Actor,
   description: string,
   run: (write: LedgerWrite) => Promise<T>,
@@ -679,17 +753,25 @@ export async function writeLedger<T>(
       .transaction()
       .setIsolationLevel("repeatable read")
       .execute(async (trx) => {
-        // La raíz de sistema serializa las decisiones que abarcan varias filas.
+        // La raíz de sistema del usuario serializa sus decisiones sobre varias filas.
         const root = await trx
           .selectFrom("accounts")
           .select("is_system")
+          .where("user_id", "=", userId)
           .where("active_parent_id", "=", "0")
           .where("name", "=", systemAccounts.income)
           .forUpdate()
           .executeTakeFirst();
         if (!root?.is_system)
           throw new Error("Falta la raíz contable Ingresos.");
-        const write = new LedgerWrite(trx, actor, description, undoes);
+        const write = new LedgerWrite(
+          trx,
+          userId,
+          actor,
+          description,
+          undoes,
+          limits,
+        );
         const result = await run(write);
         if (write.operationId !== null) {
           const account = await archivedAccountWithBalance(trx);
