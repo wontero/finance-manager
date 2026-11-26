@@ -6,6 +6,8 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Añadido
 
+- Guía de primeros pasos en Claude con estado del usuario y carga de capturas.
+
 - Metas de ahorro y topes de gasto en MCP, con avance multimoneda, bitácora, reversión y vistas de consulta por usuario.
 
 - Sección **Cuenta** para descargar los datos propios con montos exactos y borrar la cuenta, con un nuevo inicio de sesión de Google cuando la sesión supera diez minutos.

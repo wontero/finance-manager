@@ -25,5 +25,9 @@ test("M-016 S1: initialize returns the requested response instructions", async (
     /cómo voy.*ver_metas.*una línea por meta/i,
   );
 
+  expect(client.getInstructions()).toMatch(
+    /no tiene movimientos.*saluda.*qué puede hacer.*primeros_pasos.*capturas.*preguntar.*no la repit/i,
+  );
+
   await client.close();
 });

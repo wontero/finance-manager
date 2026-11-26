@@ -328,6 +328,30 @@ export function createLedger(
         getOperations(trx, page?.limit ?? limit, page?.before),
       );
     },
+    firstSteps: () =>
+      read(async (trx) => {
+        const movement = await trx
+          .selectFrom("transactions")
+          .select("id")
+          .where("deleted_at", "is", null)
+          .executeTakeFirst();
+        const accounts = await trx
+          .selectFrom("accounts")
+          .select((eb) => eb.fn.countAll<string>().as("count"))
+          .where("kind", "in", ["asset", "liability"])
+          .where("archived_at", "is", null)
+          .executeTakeFirstOrThrow();
+        const goals = await trx
+          .selectFrom("goals")
+          .select((eb) => eb.fn.countAll<string>().as("count"))
+          .where("archived_at", "is", null)
+          .executeTakeFirstOrThrow();
+        return {
+          tiene_movimientos: !!movement,
+          cuentas_propias: Number(accounts.count),
+          metas_activas: Number(goals.count),
+        };
+      }),
     dashboardAccounts: () => read(dashboard.dashboardAccounts),
     dashboardSummary: (month: string) =>
       read((trx) => dashboard.dashboardSummary(trx, month)),

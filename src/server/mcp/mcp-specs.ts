@@ -32,6 +32,7 @@ const officialTool = "actualizar_tipo_de_cambio_oficial";
 const officialUrl = "https://apibcb.cucu.bo/api/v1/tc/oficial";
 const reads = [
   "ping",
+  "primeros_pasos",
   "listar_cuentas",
   "ver_saldo",
   "patrimonio_neto",

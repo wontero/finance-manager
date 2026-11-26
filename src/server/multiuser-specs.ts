@@ -453,6 +453,76 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
       return id;
     }
 
+    test("M-026 S1 y S2: primeros pasos y aislamiento entre usuarios", async () => {
+      const id = await newUser();
+      const client = new Client({ name: "m026", version: "1" });
+      const [transport, server] = InMemoryTransport.createLinkedPair();
+      await Promise.all([
+        createMcp("m026", db, undefined, id).connect(server),
+        client.connect(transport),
+      ]);
+      try {
+        const call = async () => {
+          const result = await client.callTool({
+            name: "primeros_pasos",
+            arguments: {},
+          });
+          expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+          return result.structuredContent as {
+            tiene_movimientos: boolean;
+            cuentas_propias: number;
+            metas_activas: number;
+            guia: string;
+          };
+        };
+        const initial = await call();
+        expect(initial).toMatchObject({
+          tiene_movimientos: false,
+          cuentas_propias: 0,
+          metas_activas: 0,
+        });
+        expect(initial.guia).toMatch(/capturas/i);
+        expect(initial.guia).toContain("importar_lote");
+        const names = (await client.listTools()).tools.map((tool) => tool.name);
+        for (const name of initial.guia.match(/`[a-z_]+`/g) ?? [])
+          expect(names).toContain(name.slice(1, -1));
+        const ledger = createLedger(db, "web", id);
+        const cash = await ledger.createAccount({
+          ...accountInput,
+          name: "Caja M-026",
+        });
+        const category = (await ledger.getAccountTree(false)).find(
+          (row) => row.name === "Comida",
+        )!;
+        await ledger.createGoal({
+          type: "savings",
+          name: "Meta M-026",
+          amount: "10",
+          currency: "BOB",
+          accountIds: [cash.id],
+        });
+        expect(await call()).toMatchObject({
+          tiene_movimientos: false,
+          cuentas_propias: 1,
+          metas_activas: 1,
+        });
+        await ledger.recordExpense({
+          accountId: cash.id,
+          categoryId: category.id,
+          amount: "1",
+          date,
+          description: "Gasto M-026",
+        });
+        expect(await call()).toMatchObject({
+          tiene_movimientos: true,
+          cuentas_propias: 1,
+          metas_activas: 1,
+        });
+      } finally {
+        await client.close();
+      }
+    });
+
     beforeAll(async () => {
       db = createDatabase({
         ...localDatabase("DATABASE_URL"),
@@ -543,6 +613,7 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
           [
             ...new Set([
               "ping",
+              "primeros_pasos",
               "consulta_sql",
               ...tools.map(([name]) => name),
             ]),

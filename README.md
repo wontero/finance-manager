@@ -4,6 +4,8 @@ FinanceManager es una aplicación multiusuario con un servidor MCP remoto (Model
 
 ## Funcionalidades
 
+- Presenta una guía de primeros pasos en Claude y ofrece importar capturas de registros anteriores.
+
 - Registra gastos, ingresos, transferencias, cargas por lotes, conciliaciones y valuación patrimonial.
 - Organiza las finanzas con cuentas, categorías, etiquetas y campos personalizados.
 - Gestiona préstamos con interés simple y pagos aplicados primero a intereses.
