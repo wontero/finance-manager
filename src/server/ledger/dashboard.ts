@@ -17,12 +17,18 @@ import {
 import type { Kysely, Transaction } from "kysely";
 import { LedgerWrite } from "./audit.js";
 import { findExchangeRate } from "./metadata.js";
-import { getNetWorth, getOperations } from "./queries.js";
+import {
+  amountConverter,
+  getCurrencyScales as currencyScales,
+  getNetWorth,
+  getOperations,
+} from "./queries.js";
 import {
   findTransactions,
   getAccountBalances,
   getAccountTree,
   getPeriodSummary,
+  monthEnd,
 } from "./reports.js";
 import type { LedgerDatabase } from "./schema.js";
 
@@ -34,20 +40,6 @@ export function shiftMonth(month: string, offset: number) {
   const date = new Date(month + "-01T00:00:00Z");
   date.setUTCMonth(date.getUTCMonth() + offset);
   return date.toISOString().slice(0, 7);
-}
-
-function monthEnd(month: string) {
-  const date = new Date(month + "-01T00:00:00Z");
-  date.setUTCMonth(date.getUTCMonth() + 1, 0);
-  return date.toISOString().slice(0, 10);
-}
-
-async function currencyScales(db: Database) {
-  return new Map(
-    (
-      await db.selectFrom("currencies").select(["code", "minor_unit"]).execute()
-    ).map(({ code, minor_unit }) => [code, minor_unit]),
-  );
 }
 
 function money({ amount, currency }: Amount, scales: Scales) {
@@ -111,44 +103,22 @@ async function expenseCategories(
   date: string,
   scales: Scales,
 ): Promise<Category[]> {
-  const currencies = new Set(
-    categories.flatMap(({ amounts }) =>
-      amounts.map(({ currency }) => currency),
-    ),
-  );
-  currencies.delete("BOB");
-  const rates = new Map(
-    await Promise.all(
-      [...currencies].map(
-        async (currency) =>
-          [
-            currency,
-            (await findExchangeRate(db, currency, "BOB", date))?.rate,
-          ] as const,
-      ),
-    ),
-  );
-  const sorted = categories
-    .map(({ id, name, amounts }) => ({
+  const sum = amountConverter(db, "BOB", date, scales);
+  const sorted = await Promise.all(
+    categories.map(async ({ id, name, amounts }) => ({
       id,
       name,
       amounts: amounts.map((value) => money(value, scales)),
-      total: amounts.reduce((total, { amount, currency }) => {
-        if (currency === "BOB") return total + amount;
-        const rate = rates.get(currency);
-        return rate
-          ? total +
-              convert(amount, rate, scales.get(currency)!, scales.get("BOB")!)
-          : total;
-      }, 0n),
-    }))
-    .sort((a, b) =>
-      a.total === b.total
-        ? a.name.localeCompare(b.name, "es-BO")
-        : a.total > b.total
-          ? -1
-          : 1,
-    );
+      total: (await sum(amounts)).amount,
+    })),
+  );
+  sorted.sort((a, b) =>
+    a.total === b.total
+      ? a.name.localeCompare(b.name, "es-BO")
+      : a.total > b.total
+        ? -1
+        : 1,
+  );
   return sorted.map(({ id, name, amounts }) => ({ id, name, amounts }));
 }
 
@@ -344,6 +314,8 @@ const entities: Record<string, string> = {
   transactions: "Movimiento",
   postings: "Partida",
   loans: "Préstamo",
+  goals: "Meta",
+  goal_accounts: "Cuenta de la meta",
   tags: "Etiqueta",
   transaction_tags: "Etiqueta del movimiento",
   custom_field_definitions: "Campo personalizado",
@@ -359,6 +331,7 @@ const labels: Record<string, string> = {
   transaction_id: "Movimiento",
   tag_id: "Etiqueta",
   amount: "Monto",
+  target_amount: "Monto objetivo",
   currency: "Moneda",
   custom: "Campos",
   kind: "Tipo",
@@ -418,6 +391,7 @@ function changeDetail(
             const currency = row.currency;
             const monetary = [
               "amount",
+              "target_amount",
               "principal",
               "principal_paid",
               "interest_paid",

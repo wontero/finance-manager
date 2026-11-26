@@ -73,8 +73,38 @@ const pair = z.strictObject({
   to: currency,
   date: accountingDate.optional(),
 });
+const goalDates = {
+  startDate: accountingDate.nullable().optional(),
+  endDate: accountingDate.nullable().optional(),
+};
+const goalAccounts = z
+  .array(rowId)
+  .min(1)
+  .refine(
+    (ids) => new Set(ids).size === ids.length,
+    "Las cuentas deben ser distintas.",
+  );
+const goal = z.strictObject({
+  name,
+  amount: positiveAmount,
+  currency,
+  ...goalDates,
+});
 
 export const ledgerInputs = {
+  createGoal: z.discriminatedUnion("type", [
+    goal.extend({ type: z.literal("savings"), accountIds: goalAccounts }),
+    goal.extend({ type: z.literal("spending"), categoryId: rowId }),
+  ]),
+  updateGoal: id.extend({
+    name: name.optional(),
+    amount: positiveAmount.optional(),
+    ...goalDates,
+    accountIds: goalAccounts.optional(),
+    categoryId: rowId.optional(),
+  }),
+  archiveGoal: id,
+  listGoals: z.strictObject({ id: rowId.optional() }),
   createAccount: accountInput,
   createCategory: z.strictObject({
     name,

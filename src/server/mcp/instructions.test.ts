@@ -21,6 +21,9 @@ test("M-016 S1: initialize returns the requested response instructions", async (
     "Para totales, saldos o resúmenes, da solo el resultado final: no muestres cálculos, sumas intermedias ni el razonamiento, salvo que el usuario los pida. Tras registrar o deshacer algo, confirma en una línea con el monto y el ID de la operación.",
   );
   expect(client.getInstructions()).not.toContain("Mateo");
+  expect(client.getInstructions()).toMatch(
+    /cómo voy.*ver_metas.*una línea por meta/i,
+  );
 
   await client.close();
 });

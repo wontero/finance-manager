@@ -63,6 +63,19 @@ const readonlyViews = {
     "created_at",
     "updated_at",
   ],
+  v_goals: [
+    "id",
+    "name",
+    "type",
+    "target_amount",
+    "currency",
+    "start_date",
+    "end_date",
+    "category_id",
+    "archived_at",
+    "created_at",
+  ],
+  v_goal_accounts: ["goal_id", "account_id"],
 } satisfies Record<string, (string | [alias: string, source: string])[]>;
 
 const columnName = (column: string | [string, string]) =>
@@ -113,6 +126,12 @@ export async function createReadonlyViews(
       sql`domain.archived_at IS NULL`,
     ],
     v_loans: [sql`${table("loans")} AS domain`, "domain", sql`TRUE`],
+    v_goals: [sql`${table("goals")} AS domain`, "domain", sql`TRUE`],
+    v_goal_accounts: [
+      sql`${table("goal_accounts")} AS domain`,
+      "domain",
+      sql`TRUE`,
+    ],
   } as const;
   const { rows: existing } = await sql<{ name: string }>`
     SELECT TABLE_NAME AS name FROM information_schema.VIEWS

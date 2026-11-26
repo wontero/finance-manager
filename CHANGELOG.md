@@ -6,6 +6,8 @@ All notable changes to FinanceManager are documented here. The format follows [K
 
 ### Añadido
 
+- Metas de ahorro y topes de gasto en MCP, con avance multimoneda, bitácora, reversión y vistas de consulta por usuario.
+
 - Sección **Cuenta** para descargar los datos propios con montos exactos y borrar la cuenta, con un nuevo inicio de sesión de Google cuando la sesión supera diez minutos.
 - Página pública **Privacidad y términos** y panel de métricas agregadas por canal, accesible con la cuenta de Google configurada.
 - Pantalla de cuentas con saldos y totales por moneda, archivadas y acceso a movimientos filtrados.
@@ -23,6 +25,8 @@ All notable changes to FinanceManager are documented here. The format follows [K
 - Los tipos oficiales USD/BOB de CUCU se comparten, incluidas las cotizaciones históricas. La valuación usa el tipo más reciente hasta la fecha solicitada y, en caso de empate, prefiere el del usuario.
 
 ### Corregido
+
+- La exportación incluye los importes decimales de la bitácora y preserva con exactitud el numerador del interés pendiente.
 
 - El servidor advierte si el usuario #1 sigue sin vincular y ya existen otros usuarios. La prueba del límite por minuto usa un reloj controlado.
 - Las consultas SQL validan las fuentes en grupos con operaciones de conjuntos y reintentan la limpieza de mapeos ante un interbloqueo.

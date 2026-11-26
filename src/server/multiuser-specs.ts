@@ -18,7 +18,7 @@ import { select } from "./mcp/readonly-sql.js";
 import { localDatabase } from "./scripts/local-database.js";
 
 const date = "1997-11-11";
-const limits = { accounts: 20, tags: 1, dailyTransactions: 3 };
+const limits = { accounts: 20, tags: 1, dailyTransactions: 3, goals: 100 };
 const accountInput = {
   kind: "asset",
   subtype: "efectivo",
@@ -108,9 +108,19 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
         ["exchange_rates", "source", "TRUE"],
         ["custom_field_definitions", "id", "archived_at IS NULL"],
         ["loans", "id", "TRUE"],
+        ["goals", "id", "TRUE"],
+        ["goal_accounts", "goal_id", "TRUE"],
       ] as const;
 
       beforeAll(async () => {
+        for (const { ledger, cash } of [a, b])
+          await ledger.createGoal({
+            type: "savings",
+            name: "Meta de aislamiento",
+            amount: "10",
+            currency: "BOB",
+            accountIds: [cash],
+          });
         reader = createDatabase({
           ...localDatabase("READONLY_DATABASE_URL"),
           database: readonlySchema,
@@ -140,7 +150,7 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
         await reader?.db.destroy();
       });
 
-      test("S1: ambas identidades ven exactamente sus filas en las ocho vistas", async () => {
+      test("S1: ambas identidades ven exactamente sus filas en todas las vistas", async () => {
         for (const [table, key, filter] of sources) {
           const view = "v_" + table;
           for (const [user, id] of [aId, bId].entries()) {
@@ -182,7 +192,7 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
         );
       });
 
-      test("S3: las ocho vistas devuelven cero filas sin mapeo", async () => {
+      test("S3: las vistas devuelven cero filas sin mapeo", async () => {
         for (const [table] of sources) {
           const [result] = await reader.pool
             .promise()
@@ -488,6 +498,7 @@ export function multiuserSpecs(schema: string, readonlySchema: string) {
         ["listar_operaciones", { limite: 100 }],
         ["consultar_prestamos", { fecha: date }],
         ["consultar_prestamos", { id: b.loan.id, fecha: date }],
+        ["ver_metas", {}],
       ];
       const paths = [
         "/session",

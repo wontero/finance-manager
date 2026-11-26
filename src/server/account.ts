@@ -3,6 +3,8 @@ import { sql } from "kysely";
 import { authTransaction, type AuthDb } from "./auth-store.js";
 
 const tables = [
+  "goal_accounts",
+  "goals",
   "transaction_tags",
   "postings",
   "transactions",
@@ -29,8 +31,10 @@ function exportRow(
     table === "postings"
       ? ["amount"]
       : table === "loans"
-        ? ["principal", "principal_paid", "interest_paid"]
-        : [];
+        ? ["principal", "principal_paid", "interest_paid", "interest_carry"]
+        : table === "goals"
+          ? ["target_amount"]
+          : [];
   for (const column of columns) {
     const value = row[column];
     if (typeof value === "string" && typeof row.currency === "string")

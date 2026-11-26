@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "kysely";
 import request, { type Response } from "supertest";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createApp } from "./app.js";
 import { digest, newToken } from "./auth-store.js";
 import { readConfig } from "./config.js";
 import { createDatabase } from "./database.js";
 import { fakeGoogle, responseCookie } from "./google-test-provider.js";
+import { createLedger } from "./ledger/index.js";
+import { ledgerLimits } from "./ledger/limits.js";
 import { seed } from "./multiuser-specs.js";
 import { localDatabase } from "./scripts/local-database.js";
 
@@ -25,6 +27,8 @@ const domain = [
 ] as const;
 const owned = [
   ...domain,
+  "goals",
+  "goal_accounts",
   "oauth_authorization_codes",
   "oauth_tokens",
   "web_sessions",
@@ -44,6 +48,7 @@ export function accountSpecs(schema: string, readonlySchema: string) {
     let cookieA: string;
     let cookieB: string;
     const access = newToken();
+    const accessB = newToken();
     const sessionHash = (cookie: string) => digest(cookie.split("=")[1]);
 
     function googleCallback(response: Response, sub: string) {
@@ -59,12 +64,27 @@ export function accountSpecs(schema: string, readonlySchema: string) {
       return responseCookie(await googleCallback(start, sub).expect(303));
     }
 
-    const rpc = (method: string, params?: object) =>
+    const rpc = (method: string, params?: object, token = access) =>
       browser
         .post("/mcp")
-        .set("Authorization", "Bearer " + access)
+        .set("Authorization", "Bearer " + token)
         .set("Accept", "application/json, text/event-stream")
         .send({ jsonrpc: "2.0", id: 1, method, params });
+
+    async function tool(name: string, args: object = {}, token = access) {
+      const { body } = await rpc(
+        "tools/call",
+        { name, arguments: args },
+        token,
+      ).expect(200);
+      return body.result;
+    }
+
+    async function goalWrite(name: string, args: object, token = access) {
+      const result = await tool(name, args, token);
+      expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+      return result.structuredContent as { id: string; operationId: string };
+    }
 
     async function snapshot(user: string) {
       return Object.fromEntries(
@@ -133,12 +153,8 @@ export function accountSpecs(schema: string, readonlySchema: string) {
           database.db,
         );
         await sql`INSERT INTO oauth_tokens (token_hash, token_type, family_id, client_id, resource, expires_at, family_expires_at, user_id)
-          VALUES (${digest(user === "1" ? access : newToken())}, 'access', ${family}, ${clientId}, ${site + "/mcp"}, ${expires}, ${expires}, ${user}),
+          VALUES (${digest(user === "1" ? access : accessB)}, 'access', ${family}, ${clientId}, ${site + "/mcp"}, ${expires}, ${expires}, ${user}),
             (${digest(newToken())}, 'refresh', ${family}, ${clientId}, ${site + "/mcp"}, ${expires}, ${expires}, ${user})`.execute(
-          database.db,
-        );
-        await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
-          VALUES (${1000000000 + Number(user)}, ${user}, ${randomUUID()}, ${expires})`.execute(
           database.db,
         );
       }
@@ -147,6 +163,418 @@ export function accountSpecs(schema: string, readonlySchema: string) {
     afterAll(async () => {
       await google?.close();
       await database?.db.destroy();
+    });
+
+    test("M-025 S1: valida, registra y deshace todo el ciclo de una meta", async () => {
+      const savings = {
+        tipo: "ahorro",
+        nombre: "Fondo temporal",
+        monto: "100",
+        moneda: "BOB",
+        cuentas: [a.cash],
+      };
+      const spending = {
+        tipo: "tope",
+        nombre: "Tope inválido",
+        monto: "100",
+        moneda: "BOB",
+        periodo: "mensual",
+      };
+      for (const input of [
+        { ...savings, cuentas: [b.cash] },
+        { ...savings, cuentas: [a.category] },
+        { ...savings, monto: "0" },
+        { ...savings, monto: "-1" },
+        { ...savings, inicio: "2026-08-02", limite: "2026-08-01" },
+        { ...spending, categoria: b.category },
+        { ...spending, categoria: a.cash },
+      ])
+        expect((await tool("crear_meta", input)).isError).toBe(true);
+      const created = await goalWrite("crear_meta", savings);
+      expect((await tool("crear_meta", savings)).isError).toBe(true);
+      const capped = createLedger(database.db, "claude", "1", {
+        ...ledgerLimits({}),
+        goals: 1,
+      });
+      expect(ledgerLimits({}).goals).toBe(100);
+      await expect(
+        capped.createGoal({
+          type: "savings",
+          name: "Otra meta",
+          amount: "1",
+          currency: "BOB",
+          accountIds: [a.cash],
+        }),
+      ).rejects.toThrow(/límite/);
+      expect(
+        (await tool("modificar_meta", { id: created.id, cuentas: [b.cash] }))
+          .isError,
+      ).toBe(true);
+      const changed = await goalWrite("modificar_meta", {
+        id: created.id,
+        nombre: "Fondo actualizado",
+        monto: "200",
+        cuentas: [a.loan.accountId],
+        inicio: "2026-08-01",
+        limite: "2026-10-01",
+      });
+      const archived = await goalWrite("archivar_meta", { id: created.id });
+      expect((await tool("ver_metas")).structuredContent).toEqual({
+        metas: [],
+      });
+
+      async function audit(operationId: string) {
+        return (
+          await sql<{ table_name: string; action: string }>`
+          SELECT table_name, action FROM audit_log WHERE operation_id = ${operationId} ORDER BY id
+        `.execute(database.db)
+        ).rows.map(({ table_name, action }) => `${table_name}/${action}`);
+      }
+      expect(await audit(created.operationId)).toEqual([
+        "goals/insert",
+        "goal_accounts/insert",
+      ]);
+      expect(await audit(changed.operationId)).toEqual([
+        "goals/update",
+        "goal_accounts/delete",
+        "goal_accounts/insert",
+      ]);
+      expect(await audit(archived.operationId)).toEqual(["goals/update"]);
+      const undo = (operationId: string) =>
+        goalWrite("deshacer_operacion", { operationId });
+      const restored = await undo(archived.operationId);
+      expect(await audit(restored.operationId)).toEqual(["goals/update"]);
+      const readGoal = async () =>
+        (await tool("ver_metas", { id: created.id })).structuredContent
+          .metas[0];
+      expect(await readGoal()).toMatchObject({
+        nombre: "Fondo actualizado",
+        objetivo: { monto: "200.00" },
+        cuentas: [a.loan.accountId],
+      });
+      await undo(changed.operationId);
+      expect(await readGoal()).toMatchObject({
+        nombre: savings.nombre,
+        objetivo: { monto: "100.00" },
+        cuentas: savings.cuentas,
+      });
+      await undo(created.operationId);
+      expect((await tool("ver_metas", { id: created.id })).isError).toBe(true);
+    });
+
+    test("M-025 S2: suma saldos, convierte a la fecha y calcula el ahorro por mes", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-08-01T04:00:00Z"));
+        const { id: bolivianos } = await a.ledger.createAccount({
+          name: "Ahorro BOB",
+          kind: "asset",
+          subtype: "efectivo",
+          currency: "BOB",
+          opening: { amount: "100", date: "2026-07-01" },
+        });
+        const { id: dolares } = await a.ledger.createAccount({
+          name: "Ahorro USD",
+          kind: "asset",
+          subtype: "efectivo",
+          currency: "USD",
+          opening: { amount: "10", date: "2026-07-01" },
+        });
+        const { id: pasivo } = await a.ledger.createAccount({
+          name: "Pasivo elegido",
+          kind: "liability",
+          subtype: "tarjeta_credito",
+          currency: "BOB",
+          opening: { amount: "5", date: "2026-07-01" },
+        });
+        for (const [date, rate] of [
+          ["2026-08-01", "7"],
+          ["2026-08-02", "8"],
+        ])
+          await a.ledger.recordExchangeRate({
+            from: "USD",
+            to: "BOB",
+            date,
+            source: "M-025",
+            rate,
+          });
+        const { id } = await goalWrite("crear_meta", {
+          tipo: "ahorro",
+          nombre: "Fondo de viaje",
+          monto: "300",
+          moneda: "BOB",
+          cuentas: [bolivianos, dolares, pasivo],
+          limite: "2026-09-30",
+        });
+        const result = await tool("ver_metas", { id });
+        expect(result.structuredContent.metas[0]).toMatchObject({
+          saldo: { monto: "175.00", moneda: "BOB" },
+          falta: { monto: "125.00" },
+          porcentaje: "58.33",
+          dias_restantes: 60,
+          ahorro_mensual: { monto: "62.50" },
+        });
+        expect(result.content[0].text).toContain("62,50 BOB");
+        await goalWrite("modificar_meta", { id, limite: null });
+        const open = (await tool("ver_metas", { id })).structuredContent
+          .metas[0];
+        expect(open).not.toHaveProperty("ahorro_mensual");
+        expect(open).not.toHaveProperty("dias_restantes");
+        await goalWrite("archivar_meta", { id });
+        const usdGoal = await goalWrite("crear_meta", {
+          tipo: "ahorro",
+          nombre: "Fondo en dólares",
+          monto: "25",
+          moneda: "USD",
+          cuentas: [bolivianos],
+        });
+        expect(
+          (await tool("ver_metas", { id: usdGoal.id })).structuredContent
+            .metas[0],
+        ).toMatchObject({
+          saldo: null,
+          falta: null,
+          porcentaje: null,
+          monedas_sin_tipo: ["BOB"],
+        });
+        await a.ledger.recordExchangeRate({
+          from: "BOB",
+          to: "USD",
+          date: "2026-08-01",
+          source: "M-025",
+          rate: "0.14",
+        });
+        expect(
+          (await tool("ver_metas", { id: usdGoal.id })).structuredContent
+            .metas[0],
+        ).toMatchObject({
+          saldo: { monto: "14.00", moneda: "USD" },
+          falta: { monto: "11.00" },
+        });
+        await goalWrite("archivar_meta", { id: usdGoal.id });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("M-025 S3: respeta el árbol, los borrados y el primer día del mes en La Paz", async () => {
+      const { id: child } = await a.ledger.createCategory({
+        parentId: a.category,
+        name: "Subcategoría de prueba",
+      });
+      const { id: outside } = await a.ledger.createCategory({
+        parentId: a.parentId,
+        name: "Otra categoría de prueba",
+      });
+      const expense = (categoryId: string, date: string, amount: string) =>
+        a.ledger.recordExpense({
+          accountId: a.cash,
+          categoryId,
+          date,
+          amount,
+          description: "Prueba M-025",
+        });
+      await expense(a.category, "2026-07-31", "5");
+      await expense(a.category, "2026-08-01", "6");
+      await expense(child, "2026-08-02", "7");
+      await expense(outside, "2026-08-01", "99");
+      const erased = await expense(child, "2026-08-01", "99");
+      await a.ledger.deleteTransaction({ id: erased.id });
+      const { id: cashUsd } = await a.ledger.createAccount({
+        kind: "asset",
+        subtype: "efectivo",
+        currency: "USD",
+        name: "Caja USD para tope",
+      });
+      await a.ledger.recordExpense({
+        accountId: cashUsd,
+        categoryId: child,
+        date: "2026-08-02",
+        amount: "2",
+        description: "Prueba de tope multimoneda",
+      });
+      await a.ledger.recordExchangeRate({
+        from: "USD",
+        to: "BOB",
+        date: "2026-08-01",
+        rate: "7",
+        source: "BCB referencial venta",
+      });
+      const { id } = await goalWrite("crear_meta", {
+        tipo: "tope",
+        nombre: "Gasto del mes",
+        monto: "10",
+        moneda: "BOB",
+        categoria: a.category,
+        periodo: "mensual",
+      });
+      const progress = async () =>
+        (await tool("ver_metas", { id })).structuredContent.metas[0];
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-08-01T03:59:59Z"));
+        expect(await progress()).toMatchObject({
+          inicio: "2026-07-01",
+          limite: "2026-07-31",
+          gastado: { monto: "5.00" },
+          queda: { monto: "5.00" },
+          porcentaje: "50.00",
+          superado: false,
+        });
+        vi.setSystemTime(new Date("2026-08-01T04:00:00Z"));
+        expect(await progress()).toMatchObject({
+          inicio: "2026-08-01",
+          limite: "2026-08-31",
+          gastado: { monto: "27.00" },
+          queda: { monto: "0.00" },
+          porcentaje: "270.00",
+          superado: true,
+        });
+        const change = await goalWrite("modificar_meta", {
+          id,
+          inicio: "2026-08-02",
+          limite: "2026-08-02",
+        });
+        expect(await progress()).toMatchObject({ gastado: { monto: "21.00" } });
+        await goalWrite("deshacer_operacion", {
+          operationId: change.operationId,
+        });
+        expect(await progress()).toMatchObject({ gastado: { monto: "27.00" } });
+        await goalWrite("modificar_meta", { id, categoria: outside });
+        expect(await progress()).toMatchObject({ gastado: { monto: "99.00" } });
+      } finally {
+        vi.useRealTimers();
+      }
+      await goalWrite("archivar_meta", { id });
+    });
+
+    test("M-025 S4: MCP y las vistas aíslan metas y la exportación incluye las propias", async () => {
+      const input = {
+        tipo: "ahorro",
+        nombre: "Meta propia A",
+        monto: "90071992547409.91",
+        moneda: "BOB",
+        cuentas: [a.cash],
+      };
+      const own = await goalWrite("crear_meta", input);
+      const other = await goalWrite(
+        "crear_meta",
+        {
+          ...input,
+          nombre: "Meta propia B",
+          cuentas: [b.cash],
+        },
+        accessB,
+      );
+      expect(
+        (await tool("ver_metas", {}, accessB)).structuredContent.metas,
+      ).toMatchObject([{ id: other.id, nombre: "Meta propia B" }]);
+      for (const [name, args] of [
+        ["ver_metas", { id: own.id }],
+        ["modificar_meta", { id: own.id, monto: "1" }],
+        ["archivar_meta", { id: own.id }],
+        ["deshacer_operacion", { operationId: own.operationId }],
+      ] as const)
+        expect((await tool(name, args, accessB)).isError).toBe(true);
+      for (const [view, key] of [
+        ["v_goals", "id"],
+        ["v_goal_accounts", "goal_id"],
+      ]) {
+        const { structuredContent } = await tool(
+          "consulta_sql",
+          {
+            sql: `SELECT * FROM ${view} WHERE ${key} IN (${own.id}, ${other.id})`,
+          },
+          accessB,
+        );
+        expect(structuredContent.filas).toHaveLength(1);
+        expect(structuredContent.filas[0][key]).toBe(other.id);
+        expect(structuredContent.filas[0]).not.toHaveProperty("user_id");
+      }
+      const { body } = await browser
+        .get("/api/account/export")
+        .set("Cookie", cookieA)
+        .expect(200);
+      expect(body.goals).toContainEqual(
+        expect.objectContaining({
+          id: own.id,
+          target_amount: input.monto,
+        }),
+      );
+      expect(body.goal_accounts).toContainEqual(
+        expect.objectContaining({
+          goal_id: own.id,
+          account_id: a.cash,
+        }),
+      );
+      expect(body.audit_log).toContainEqual(
+        expect.objectContaining({
+          operation_id: own.operationId,
+          table_name: "goals",
+          after: expect.objectContaining({ target_amount: input.monto }),
+        }),
+      );
+      expect(body.goals).not.toContainEqual(
+        expect.objectContaining({ id: other.id }),
+      );
+    });
+
+    test("M-025: exporta montos de auditoría y acarreo con precisión decimal", async () => {
+      const loan = await a.ledger.registerLoan({
+        direction: "given",
+        counterparty: "Acarreo de prueba",
+        amount: "100",
+        currency: "BOB",
+        date: "2020-01-01",
+        rate: "1",
+        ratePeriod: "annual",
+        withoutCash: true,
+      });
+      const payment = await a.ledger.payLoan({
+        id: loan.id,
+        date: "2020-01-02",
+        amount: "1",
+        accountId: a.cash,
+      });
+      const { body } = await browser
+        .get("/api/account/export")
+        .set("Cookie", cookieA)
+        .expect(200);
+      expect(body.loans).toContainEqual(
+        expect.objectContaining({
+          id: loan.id,
+          interest_carry: "100000000.00",
+        }),
+      );
+      expect(body.audit_log).toContainEqual(
+        expect.objectContaining({
+          operation_id: payment.operationId,
+          table_name: "loans",
+          before: expect.objectContaining({
+            principal: "100.00",
+            principal_paid: "0.00",
+            interest_carry: "0.00",
+          }),
+          after: expect.objectContaining({
+            principal_paid: "1.00",
+            interest_carry: "100000000.00",
+          }),
+        }),
+      );
+      expect(body.audit_log).toContainEqual(
+        expect.objectContaining({
+          operation_id: a.entry.operationId,
+          table_name: "postings",
+          after: expect.objectContaining({ amount: "-90071992547409.91" }),
+        }),
+      );
+    });
+
+    test("M-025: reauth exige Origin aun con una sesión válida", async () => {
+      await browser
+        .post("/auth/google/reauth")
+        .set("Cookie", cookieA)
+        .expect(403);
     });
 
     test("S1: exporta todos los datos financieros propios con montos decimales exactos", async () => {
@@ -352,7 +780,20 @@ export function accountSpecs(schema: string, readonlySchema: string) {
         expect(result.text).toContain(value);
     });
 
-    test("S2: borra por transacción al usuario #1, exige confirmación y deja a B intacto", async () => {
+    test("M-024 S2 / M-025 S4: borra al usuario #1 junto con sus metas y deja a B intacto", async () => {
+      for (const { ledger, cash } of [a, b])
+        await ledger.createGoal({
+          type: "savings",
+          name: "Meta para probar el borrado",
+          amount: "100",
+          currency: "BOB",
+          accountIds: [cash],
+        });
+      for (const user of ["1", userB])
+        await sql`INSERT INTO readonly_sql_sessions (connection_id, user_id, lock_name, expires_at)
+          VALUES (${1000000000 + Number(user)}, ${user}, ${randomUUID()}, UTC_TIMESTAMP(3) + INTERVAL 1 HOUR)`.execute(
+          database.db,
+        );
       const remove = (confirmation: string, cookie = cookieA) =>
         browser
           .delete("/api/account")

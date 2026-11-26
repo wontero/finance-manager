@@ -1,6 +1,7 @@
 const settings = {
   accounts: ["MAX_ACCOUNTS_PER_USER", 500],
   tags: ["MAX_TAGS_PER_USER", 500],
+  goals: ["MAX_GOALS_PER_USER", 100],
   dailyTransactions: ["MAX_TRANSACTIONS_PER_USER_PER_DAY", 2000],
 } as const;
 
@@ -19,6 +20,7 @@ export function ledgerLimits(
   return {
     accounts: read("accounts"),
     tags: read("tags"),
+    goals: read("goals"),
     dailyTransactions: read("dailyTransactions"),
   };
 }

@@ -42,6 +42,7 @@ const reads = [
   "listar_operaciones",
   "consulta_sql",
   "consultar_prestamos",
+  "ver_metas",
 ];
 const writes = [
   "registrar_gasto",
@@ -62,6 +63,9 @@ const writes = [
   "deshacer_operacion",
   "registrar_prestamo",
   "abonar_prestamo",
+  "crear_meta",
+  "modificar_meta",
+  "archivar_meta",
 ];
 const destructive = [
   "editar_movimiento",
@@ -70,6 +74,8 @@ const destructive = [
   "fusionar_categorias",
   "definir_campo_personalizado",
   "deshacer_operacion",
+  "modificar_meta",
+  "archivar_meta",
 ];
 const date = "1993-09-12";
 const origin = "https://finanzas.example";

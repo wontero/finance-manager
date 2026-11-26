@@ -23,6 +23,8 @@ const primaryKeys = {
   transactions: ["id"],
   postings: ["id"],
   loans: ["id"],
+  goals: ["id"],
+  goal_accounts: ["goal_id", "account_id"],
   tags: ["id"],
   transaction_tags: ["transaction_id", "tag_id"],
   custom_field_definitions: ["id"],
@@ -47,6 +49,9 @@ const foreignKeys = [
   ["postings", "account_id", "accounts"],
   ["postings", "transaction_id", "transactions"],
   ["loans", "account_id", "accounts"],
+  ["goals", "category_id", "accounts"],
+  ["goal_accounts", "goal_id", "goals"],
+  ["goal_accounts", "account_id", "accounts"],
   ["transaction_tags", "transaction_id", "transactions"],
   ["transaction_tags", "tag_id", "tags"],
 ] as const; // Solo referencias a filas que el dominio puede borrar al deshacer.
@@ -105,6 +110,7 @@ function uniqueKeys(table: Table, row: Snapshot | null): SqlValues[] {
       return keys;
     }
     case "tags":
+    case "goals":
       return [{ name: row.name }];
     case "custom_field_definitions":
       return [{ entity: row.entity, key: row.key }];
@@ -194,6 +200,18 @@ export class LedgerWrite {
   }
 
   private async insertRow<T extends Table>(table: T, values: SqlValues) {
+    if (table === "goals" && this.limits) {
+      const { count } = await this.db
+        .selectFrom("goals")
+        .select(({ fn }) => fn.countAll<string>().as("count"))
+        .executeTakeFirstOrThrow();
+      if (Number(count) >= this.limits.goals) {
+        const Conflict = this.undoes === null ? Error : UndoConflict;
+        throw new Conflict(
+          `Se alcanzó el límite de ${this.limits.goals} metas por usuario.`,
+        );
+      }
+    }
     values = { ...values, user_id: this.userId };
     const keys = Object.keys(values);
     const { insertId } = await sql`INSERT INTO ${sql.table(table)}

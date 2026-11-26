@@ -33,6 +33,20 @@ export type LedgerDatabase = {
     undoes_operation_id: Generated<string | null>;
     created_at: Generated<string>;
   };
+  goals: {
+    id: Generated<string>;
+    user_id: string;
+    name: string;
+    type: LedgerInput<"createGoal">["type"];
+    target_amount: string;
+    currency: string;
+    start_date: string | null;
+    end_date: string | null;
+    category_id: string | null;
+    archived_at: Generated<string | null>;
+    created_at: Generated<string>;
+  };
+  goal_accounts: { user_id: string; goal_id: string; account_id: string };
   loans: {
     id: Generated<string>;
     user_id: string;
@@ -115,6 +129,7 @@ export type ExchangeRate = Omit<
   "user_id"
 >;
 export type Loan = Selectable<LedgerDatabase["loans"]>;
+export type Goal = Selectable<LedgerDatabase["goals"]>;
 
 export const cucuSourcePrefix = "Tipo de cambio oficial BCB vía apibcb.cucu.bo";
 

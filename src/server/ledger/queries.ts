@@ -39,6 +39,51 @@ export async function getAccountTotal(
   return BigInt(amount ?? 0);
 }
 
+export async function getCurrencyScales(db: Kysely<LedgerDatabase>) {
+  const rows = await db
+    .selectFrom("currencies")
+    .select(["code", "minor_unit"])
+    .execute();
+  return new Map(rows.map(({ code, minor_unit }) => [code, minor_unit]));
+}
+
+export function amountConverter(
+  db: Kysely<LedgerDatabase>,
+  destination: string,
+  date: string,
+  scales: ReadonlyMap<string, number>,
+) {
+  const scale = scales.get(destination);
+  if (scale === undefined)
+    throw new Error(`No existe la moneda ${destination}.`);
+  const rates = new Map<string, Promise<string | undefined>>();
+  return async <T extends { currency: string; amount: bigint }>(
+    rows: readonly T[],
+  ) => {
+    let amount = 0n;
+    const unvalued: T[] = [];
+    for (const row of rows) {
+      if (row.amount === 0n) continue;
+      if (row.currency === destination) {
+        amount += row.amount;
+        continue;
+      }
+      let lookup = rates.get(row.currency);
+      if (!lookup) {
+        lookup = findExchangeRate(db, row.currency, destination, date).then(
+          (rate) => rate?.rate,
+        );
+        rates.set(row.currency, lookup);
+      }
+      const rate = await lookup;
+      if (rate)
+        amount += convert(row.amount, rate, scales.get(row.currency)!, scale);
+      else unvalued.push(row);
+    }
+    return { amount, unvalued };
+  };
+}
+
 export async function getNetWorth(db: Kysely<LedgerDatabase>, date: string) {
   const balances = await currentPostings(db)
     .innerJoin("accounts as a", "a.id", "p.account_id")
@@ -48,47 +93,27 @@ export async function getNetWorth(db: Kysely<LedgerDatabase>, date: string) {
       "a.name",
       "a.kind",
       "c.code as currency",
-      "c.minor_unit",
       sql<string>`SUM(p.amount)`.as("amount"),
     ])
     .where("a.kind", "in", ["asset", "liability"])
     .where("t.date", "<=", date)
-    .groupBy(["a.id", "a.name", "a.kind", "c.code", "c.minor_unit"])
+    .groupBy(["a.id", "a.name", "a.kind", "c.code"])
     .having(sql<string>`SUM(p.amount)`, "!=", "0")
     .orderBy("a.id")
     .execute();
-  const bob = await db
-    .selectFrom("currencies")
-    .select("minor_unit")
-    .where("code", "=", "BOB")
-    .executeTakeFirst();
-  if (!bob) throw new Error("No existe la moneda base BOB.");
-  const rates = new Map<string, string | null>();
-  const unvalued = [];
-  let amount = 0n;
-  for (const balance of balances) {
-    const units = BigInt(balance.amount);
-    if (balance.currency === "BOB") {
-      amount += units;
-      continue;
-    }
-    if (!rates.has(balance.currency)) {
-      const rate = await findExchangeRate(db, balance.currency, "BOB", date);
-      rates.set(balance.currency, rate?.rate ?? null);
-    }
-    const rate = rates.get(balance.currency);
-    if (rate)
-      amount += convert(units, rate, balance.minor_unit, bob.minor_unit);
-    else
-      unvalued.push({
-        id: balance.id,
-        name: balance.name,
-        kind: balance.kind,
-        currency: balance.currency,
-        amount: naturalAmount(balance.kind, units),
-      });
-  }
-  return { amount, currency: "BOB" as const, unvalued };
+  const currency = "BOB" as const;
+  const sum = amountConverter(db, currency, date, await getCurrencyScales(db));
+  const { amount, unvalued } = await sum(
+    balances.map((balance) => ({ ...balance, amount: BigInt(balance.amount) })),
+  );
+  return {
+    amount,
+    currency,
+    unvalued: unvalued.map((balance) => ({
+      ...balance,
+      amount: naturalAmount(balance.kind, balance.amount),
+    })),
+  };
 }
 
 export function descendants(

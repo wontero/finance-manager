@@ -7,6 +7,7 @@ FinanceManager es una aplicación multiusuario con un servidor MCP remoto (Model
 - Registra gastos, ingresos, transferencias, cargas por lotes, conciliaciones y valuación patrimonial.
 - Organiza las finanzas con cuentas, categorías, etiquetas y campos personalizados.
 - Gestiona préstamos con interés simple y pagos aplicados primero a intereses.
+- Gestiona desde Claude metas de ahorro por saldo de cuentas y topes de gasto por categoría, con período mensual o fechas elegidas.
 - Registra la cotización oficial USD/BOB consultada a través de CUCU, un tercero sin afiliación al BCB, o permite anotarla manualmente.
 - Permite consultar y deshacer operaciones, además de consultar datos mediante SQL de solo lectura.
 - Ofrece un dashboard de resumen, movimientos, informes y actividad de Claude.
@@ -140,7 +141,7 @@ La [guía de despliegue](docs/operacion/despliegue.md) cubre cPanel, Passenger, 
 
 ## Hoja de ruta
 
-Después del dashboard están previstos presupuestos, movimientos recurrentes y objetivos financieros.
+Después del dashboard están previstos presupuestos y movimientos recurrentes.
 
 ## Licencia
 

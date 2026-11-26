@@ -9,6 +9,7 @@ import {
 import type { Kysely, Transaction } from "kysely";
 import type { z } from "zod";
 import * as accounts from "./accounts.js";
+import * as goals from "./goals.js";
 import { utcStamp, writeLedger, type LedgerWrite } from "./audit.js";
 import {
   findExchangeRate,
@@ -20,6 +21,7 @@ import * as loans from "./loans.js";
 import {
   getAccountTotal,
   getCategoryTotals,
+  getCurrencyScales,
   getNetWorth,
   getOperations,
   naturalAmount,
@@ -82,6 +84,21 @@ export function createLedger(
   }
 
   return {
+    createGoal: mutate(ledgerInputs.createGoal, "Crear meta", goals.createGoal),
+    updateGoal: mutate(
+      ledgerInputs.updateGoal,
+      "Modificar meta",
+      goals.updateGoal,
+    ),
+    archiveGoal: mutate(
+      ledgerInputs.archiveGoal,
+      "Archivar meta",
+      goals.archiveGoal,
+    ),
+    listGoals(input: LedgerInput<"listGoals"> = {}) {
+      const value = parseLedgerInput(ledgerInputs.listGoals, input);
+      return read((trx) => goals.listGoals(trx, value));
+    },
     createAccount: mutate(
       ledgerInputs.createAccount,
       "Crear cuenta",
@@ -325,15 +342,7 @@ export function createLedger(
       reports.getAccountTree(db, includeArchived),
     listAccountBalances: (ids: string[], date: string) =>
       read((trx) => reports.getAccountBalances(trx, ids, date)),
-    async getCurrencyScales() {
-      const currencies = await db
-        .selectFrom("currencies")
-        .select(["code", "minor_unit"])
-        .execute();
-      return new Map(
-        currencies.map(({ code, minor_unit }) => [code, minor_unit]),
-      );
-    },
+    getCurrencyScales: () => getCurrencyScales(db),
     getPeriodSummary: (input: Parameters<typeof reports.getPeriodSummary>[1]) =>
       read((trx) => reports.getPeriodSummary(trx, input)),
     findTransactions: (input: Parameters<typeof reports.findTransactions>[1]) =>

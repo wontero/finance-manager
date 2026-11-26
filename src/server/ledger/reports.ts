@@ -6,6 +6,12 @@ import type { LedgerDatabase } from "./schema.js";
 type Database = Kysely<LedgerDatabase>;
 type Page = { limit: number; after?: string };
 
+export function monthEnd(month: string) {
+  const date = new Date(month + "-01T00:00:00Z");
+  date.setUTCMonth(date.getUTCMonth() + 1, 0);
+  return date.toISOString().slice(0, 10);
+}
+
 export async function getAccountTree(db: Database, includeArchived: boolean) {
   const accounts = await db
     .selectFrom("accounts")

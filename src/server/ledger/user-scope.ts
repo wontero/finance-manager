@@ -16,6 +16,8 @@ const ownedTables = new Set([
   "accounts",
   "operations",
   "loans",
+  "goals",
+  "goal_accounts",
   "transactions",
   "postings",
   "tags",
