@@ -17,6 +17,29 @@ FinanceManager es una aplicación multiusuario con un servidor MCP remoto (Model
 - Muestra métricas agregadas de uso a la cuenta designada por el operador en la configuración.
 - Protege el acceso y permite crear copias cifradas con guías de despliegue y recuperación.
 
+## Cómo empezar
+
+### En mi servidor
+
+1. En Claude.ai, en la web, escritorio o móvil, abre **Configuración → Conectores → Agregar conector personalizado** y añade `https://finanzasmateo.ingetech.biz/mcp`.
+2. Pulsa **Iniciar sesión con Google** y autoriza el acceso. Completa el proceso de una sola vez, en menos de 10 minutos y en el navegador normal, no en el navegador interno de WhatsApp o Instagram.
+3. Si quieres, en los permisos del conector marca **Permitir siempre**.
+4. Abre un chat nuevo y escribe «hola» o «¿qué puedes hacer?». Claude te mostrará una guía de primeros pasos; también puedes subir capturas de otra app para importar tus datos.
+5. Para ver gráficos, abre [el dashboard](https://finanzasmateo.ingetech.biz) e inicia sesión con la misma cuenta de Google.
+
+Hay un cupo de cuentas y los datos de cada usuario están aislados. Consulta [Privacidad y términos](https://finanzasmateo.ingetech.biz/privacidad).
+
+### En tu servidor
+
+Necesitas hosting con Node.js 22 y MariaDB 10.6, por ejemplo cPanel con Passenger.
+
+1. Crea un cliente OAuth en Google Cloud y prepara las bases de datos y sus usuarios.
+2. Completa `shared/.env` con las variables de [`.env.example`](.env.example).
+3. Ejecuta `deploy.sh --bootstrap`, registra la aplicación en Passenger y usa los despliegues normales para las actualizaciones.
+4. Conecta Claude con `https://TU-DOMINIO/mcp`.
+
+Consulta la [guía detallada de despliegue](docs/operacion/despliegue.md).
+
 ## Stack
 
 | Capa          | Tecnología                                                           |
@@ -143,7 +166,7 @@ La [guía de despliegue](docs/operacion/despliegue.md) cubre cPanel, Passenger, 
 
 ## Hoja de ruta
 
-Después del dashboard están previstos presupuestos y movimientos recurrentes.
+Después del dashboard están previstos presupuestos y movimientos recurrentes. Los topes de gasto de las metas ya cubren parte de lo que serían presupuestos.
 
 ## Licencia
 
@@ -151,4 +174,4 @@ Pendiente.
 
 ## English summary
 
-FinanceManager is a remote MCP (Model Context Protocol) server that lets Claude.ai record and query personal finances through conversation. It maintains an auditable, double-entry, multi-currency (BOB/USD) ledger, with a React dashboard, and is built with Node.js 22, TypeScript, Express, and MariaDB 10.6. It uses OAuth 2.1 and runs on cPanel with Passenger; the server calls no AI APIs, so the application adds no AI API cost.
+FinanceManager is a multi-user remote MCP (Model Context Protocol) server that lets Claude.ai record and query personal finances through conversation. Google sign-in keeps each user's data isolated. It maintains an auditable, double-entry, multi-currency (BOB/USD) ledger, savings goals with spending caps, a getting-started guide, and a React dashboard. It is built with Node.js 22, TypeScript, Express, and MariaDB 10.6, uses OAuth 2.1, and runs on cPanel with Passenger; the server calls no AI APIs, so the application adds no AI API cost. You can start with Mateo's hosted server or deploy your own.
