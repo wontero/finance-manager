@@ -15,7 +15,13 @@ test("M-016 S1: initialize returns the requested response instructions", async (
   ]);
 
   expect(client.getInstructions()).toContain(
-    "Responde breve y directo, en una o dos líneas, salvo que el usuario pida detalle.",
+    "Tono estricto: responde solo con el dato o la confirmación, en una línea, sin saludos, introducciones, resúmenes finales, ofertas de ayuda ni preguntas de seguimiento.",
+  );
+  expect(client.getInstructions()).toContain(
+    "Explica solo si la pregunta pide una explicación (por qué, cómo, qué significa, qué puedo hacer); aun así, hazlo en el mínimo de líneas posible.",
+  );
+  expect(client.getInstructions()).not.toContain(
+    "en una o dos líneas, salvo que el usuario pida detalle",
   );
   expect(client.getInstructions()).toContain(
     "Para totales, saldos o resúmenes, da solo el resultado final: no muestres cálculos, sumas intermedias ni el razonamiento, salvo que el usuario los pida. Tras registrar o deshacer algo, confirma en una línea con el monto y el ID de la operación.",
