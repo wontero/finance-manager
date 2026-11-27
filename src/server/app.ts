@@ -85,7 +85,13 @@ export function createApp(
       ))
     )
       return;
-    const server = createMcp(version, connection.db, readonly, userId);
+    const server = createMcp(
+      version,
+      connection.db,
+      readonly,
+      userId,
+      `${auth.issuer.origin}/`,
+    );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
