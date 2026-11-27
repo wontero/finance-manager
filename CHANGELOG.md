@@ -18,6 +18,7 @@ All notable changes to FinanceManager are documented here. The format follows [K
 - Herramienta MCP `actualizar_tipo_de_cambio_oficial` para registrar el tipo oficial USD/BOB vigente vía CUCU, un tercero sin afiliación al BCB, y conservar las cotizaciones ya registradas para esa fecha.
 
 ### Cambiado
+- Las instrucciones MCP piden confirmar operaciones con «Hecho» y el monto, sin mostrar IDs ni datos adicionales.
 - Las instrucciones MCP incluyen el enlace al dashboard web de la instancia.
 - Las instrucciones del servidor MCP exigen respuestas en una línea y explicaciones breves cuando se solicitan.
 
