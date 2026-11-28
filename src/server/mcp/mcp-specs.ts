@@ -347,7 +347,7 @@ export function mcpSpecs(
         [
           "crear_categoria",
           { nombre: "Categoría M-019", padre: "Gastos" },
-          /^Categoría creada\. Puedes deshacerla con deshacer_operacion y el ID .+\.$/,
+          /^Categoría creada\.$/,
         ],
       ] as const) {
         const result = await call(name, args);
@@ -357,7 +357,17 @@ export function mcpSpecs(
         expect(content[0].type).toBe("text");
         const [text, json] = content[0].text.split("\n\n");
         expect(text).toMatch(summary);
-        expect(JSON.parse(json)).toEqual(result.structuredContent);
+        const data = JSON.parse(json);
+        expect(data).toEqual(result.structuredContent);
+        if (name === "crear_categoria") {
+          expect(data).toMatchObject({
+            operationId: expect.any(String),
+            deshacer: {
+              herramienta: "deshacer_operacion",
+              operationId: data.operationId,
+            },
+          });
+        }
         expect(content[0].text).toBe(
           `${text}\n\n${JSON.stringify(result.structuredContent)}`,
         );

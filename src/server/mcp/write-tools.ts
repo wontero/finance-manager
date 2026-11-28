@@ -79,9 +79,7 @@ export function done<T extends { operationId: string | null }>(
     : null;
   return [
     { ...data, deshacer },
-    operationId
-      ? `${summary} Puedes deshacerla con deshacer_operacion y el ID ${operationId}.`
-      : `${summary} No hay cambios que deshacer.`,
+    operationId ? summary : `${summary} No hay cambios que deshacer.`,
   ];
 }
 
